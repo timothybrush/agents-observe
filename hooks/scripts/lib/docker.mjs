@@ -176,6 +176,10 @@ export async function startServer(config, log = console) {
   const labelValue = config.expectedVersion || 'unknown'
 
   function dockerRunArgs(portMapping) {
+    const transcriptMount =
+      config.transcriptStatsEnabled && config.homeDir
+        ? ['-v', `${config.homeDir}/.claude/projects:/host/.claude/projects:ro`]
+        : []
     return [
       'run',
       '-d',
@@ -188,6 +192,7 @@ export async function startServer(config, log = console) {
       ...envArgs,
       '-v',
       `${config.dataDir}:/data`,
+      ...transcriptMount,
       config.dockerImage,
     ]
   }

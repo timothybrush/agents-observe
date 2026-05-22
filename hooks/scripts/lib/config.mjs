@@ -167,6 +167,9 @@ export function getConfig(overrides = {}) {
     /* Test harness only — skip `docker pull` when image is pre-loaded. See docs/plans/_queued/spec-fresh-install-test-harness.md */
     testSkipPull: overrides.testSkipPull || process.env.AGENTS_OBSERVE_TEST_SKIP_PULL === '1',
 
+    /** When true, the server exposes /api/sessions/:id/transcript-stats and (in docker mode) the container bind-mounts ~/.claude/projects read-only. */
+    transcriptStatsEnabled: process.env.AGENTS_OBSERVE_TRANSCRIPT_STATS === '1',
+
     serverPortFile,
 
     installDir,
@@ -196,6 +199,13 @@ export function getServerEnv(config) {
     AGENTS_OBSERVE_SHUTDOWN_DELAY_MS: String(config.shutdownDelayMs),
     ...(config.isDevRuntime && { AGENTS_OBSERVE_DEV_CLIENT_PORT: config.clientPort }),
     AGENTS_OBSERVE_STORAGE_ADAPTER: 'sqlite',
+    AGENTS_OBSERVE_TRANSCRIPT_STATS: config.transcriptStatsEnabled ? '1' : '',
+    AGENTS_OBSERVE_TRANSCRIPT_HOST_BASE:
+      isDocker && config.transcriptStatsEnabled
+        ? resolve(config.homeDir, '.claude/projects')
+        : '',
+    AGENTS_OBSERVE_TRANSCRIPT_CONTAINER_BASE:
+      isDocker && config.transcriptStatsEnabled ? '/host/.claude/projects' : '',
   }
 }
 

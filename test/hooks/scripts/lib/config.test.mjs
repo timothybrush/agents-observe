@@ -473,3 +473,38 @@ describe('getClientEnv', () => {
     expect(env.AGENTS_OBSERVE_DEV_CLIENT_PORT).toBeDefined()
   })
 })
+
+describe('getServerEnv — transcript-stats env vars', () => {
+  beforeEach(() => {
+    delete process.env.AGENTS_OBSERVE_TRANSCRIPT_STATS
+  })
+  afterEach(() => {
+    delete process.env.AGENTS_OBSERVE_TRANSCRIPT_STATS
+  })
+
+  it('omits transcript-stats env vars when feature disabled', async () => {
+    const mod = await loadModule()
+    const env = mod.getServerEnv(mod.getConfig({ runtime: 'docker' }))
+    expect(env.AGENTS_OBSERVE_TRANSCRIPT_STATS).toBe('')
+    expect(env.AGENTS_OBSERVE_TRANSCRIPT_HOST_BASE).toBe('')
+    expect(env.AGENTS_OBSERVE_TRANSCRIPT_CONTAINER_BASE).toBe('')
+  })
+
+  it('populates transcript-stats env vars when feature enabled in docker', async () => {
+    process.env.AGENTS_OBSERVE_TRANSCRIPT_STATS = '1'
+    const mod = await loadModule()
+    const env = mod.getServerEnv(mod.getConfig({ runtime: 'docker' }))
+    expect(env.AGENTS_OBSERVE_TRANSCRIPT_STATS).toBe('1')
+    expect(env.AGENTS_OBSERVE_TRANSCRIPT_HOST_BASE).toMatch(/\.claude\/projects$/)
+    expect(env.AGENTS_OBSERVE_TRANSCRIPT_CONTAINER_BASE).toBe('/host/.claude/projects')
+  })
+
+  it('omits transcript-stats bases in local mode even when enabled', async () => {
+    process.env.AGENTS_OBSERVE_TRANSCRIPT_STATS = '1'
+    const mod = await loadModule()
+    const env = mod.getServerEnv(mod.getConfig({ runtime: 'local' }))
+    expect(env.AGENTS_OBSERVE_TRANSCRIPT_STATS).toBe('1')
+    expect(env.AGENTS_OBSERVE_TRANSCRIPT_HOST_BASE).toBe('')
+    expect(env.AGENTS_OBSERVE_TRANSCRIPT_CONTAINER_BASE).toBe('')
+  })
+})
