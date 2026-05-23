@@ -65,6 +65,8 @@ Use the `/observe debug` claude command to help troubleshoot and fix installatio
 
 | Skill | Description |
 |-------|-------------|
+| `/observe view` | Open the current session in the dashboard |
+| `/observe stats` | Open the current session's stats modal in the dashboard |
 | `/observe` | Open the dashboard URL and check if the server is running |
 | `/observe status` | Show server health, version, runtime, and config details |
 | `/observe start` | Start the server |
