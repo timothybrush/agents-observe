@@ -1635,13 +1635,11 @@ describe('signature_hash migration + dedup', () => {
       name: string
       unique: number
     }[]
-    expect(
-      indexes.some((i) => i.name === 'idx_events_signature_hash' && i.unique === 1),
-    ).toBe(true)
+    expect(indexes.some((i) => i.name === 'idx_events_signature_hash' && i.unique === 1)).toBe(true)
 
-    const row = db
-      .prepare('SELECT signature_hash FROM events WHERE id = 1')
-      .get() as { signature_hash: string | null }
+    const row = db.prepare('SELECT signature_hash FROM events WHERE id = 1').get() as {
+      signature_hash: string | null
+    }
     expect(row.signature_hash).toBeNull()
 
     unlinkSync(path)

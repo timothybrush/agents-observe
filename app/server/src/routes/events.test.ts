@@ -413,7 +413,9 @@ describe('POST /api/events — dedup', () => {
     expect(sessionAfterFirst.stopped_at).not.toBeNull()
 
     // Clear stopped_at so we can detect whether the dup call re-applies it.
-    ;(store as unknown as { db: { prepare: (sql: string) => { run: (...a: unknown[]) => void } } }).db
+    ;(
+      store as unknown as { db: { prepare: (sql: string) => { run: (...a: unknown[]) => void } } }
+    ).db
       .prepare('UPDATE sessions SET stopped_at = NULL WHERE id = ?')
       .run('sess-dedup')
 

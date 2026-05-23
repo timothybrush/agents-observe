@@ -72,10 +72,7 @@ describe('computeEventSignature', () => {
 
   test('changing flags changes hash', () => {
     const a = computeEventSignature(baseEnvelope, 1_000_000)
-    const b = computeEventSignature(
-      { ...baseEnvelope, flags: { stopsSession: true } },
-      1_000_000,
-    )
+    const b = computeEventSignature({ ...baseEnvelope, flags: { stopsSession: true } }, 1_000_000)
     expect(a).not.toBe(b)
   })
 

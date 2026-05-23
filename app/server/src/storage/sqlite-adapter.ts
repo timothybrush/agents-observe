@@ -372,9 +372,9 @@ export class SqliteAdapter implements EventStore {
     // rows stay NULL (SQLite treats NULLs as distinct under UNIQUE, so they
     // don't collide). Re-read columns since the rebuild above may have
     // replaced the table.
-    const postRebuildCols = this.db
-      .prepare("PRAGMA table_info('events')")
-      .all() as { name: string }[]
+    const postRebuildCols = this.db.prepare("PRAGMA table_info('events')").all() as {
+      name: string
+    }[]
     if (!postRebuildCols.some((c) => c.name === 'signature_hash')) {
       this.db.exec('ALTER TABLE events ADD COLUMN signature_hash TEXT')
     }
