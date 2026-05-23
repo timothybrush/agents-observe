@@ -321,7 +321,9 @@ export function TokenUsageSection({
   // ── Agents (main + subagents) ────────────────────────────────
   // Build the agents table rows: row 0 is the main agent (derived
   // from main-call aggregates); subsequent rows are the subagents.
-  const mainAgentRow = useMemo(() => {
+  // Inlined rather than useMemo'd because we're past the early-return
+  // guards above and adding a hook here would violate Rules of Hooks.
+  const mainAgentRow = (() => {
     let model = ''
     let cacheReadTokens = 0
     let cacheCreate5mTokens = 0
@@ -331,7 +333,6 @@ export function TokenUsageSection({
     let requests = 0
     let costCents: number | null = 0
     for (const m of stats.byModel) {
-      // Subtract subagent contribution per model to recover main-agent-only totals.
       const subForModel = stats.subagents.filter((s) => s.model === m.model)
       const subRequests = subForModel.reduce((s, x) => s + x.requests, 0)
       const subInput = subForModel.reduce((s, x) => s + x.inputTokens, 0)
@@ -375,7 +376,7 @@ export function TokenUsageSection({
       toolCount: 0,
       costCents,
     }
-  }, [stats.byModel, stats.subagents, mainAgentId])
+  })()
 
   // Combined rows for the "Agents" table: main first, then subagents.
   interface AgentRow {
