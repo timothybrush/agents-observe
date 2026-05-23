@@ -510,7 +510,7 @@ interface SessionStatsData {
   toolSuccessRate: string
   /** All tools sorted by count desc, with duration stats per tool. */
   tools: ToolStat[]
-  longestToolCall: { tool: string; durationMs: number } | null
+  longestToolCall: { tool: string; durationMs: number; eventId: number } | null
   filesTouched: number
   filesRead: number
   filesEdited: number
@@ -532,8 +532,11 @@ function computeStats(events: ParsedEvent[]): SessionStatsData {
 
   const toolCounts = new Map<string, number>()
   const toolDurations = new Map<string, number[]>()
-  const preToolTimestamps = new Map<string, { tool: string; timestamp: number }>()
-  let longestToolCall: { tool: string; durationMs: number } | null = null
+  const preToolTimestamps = new Map<
+    string,
+    { tool: string; timestamp: number; eventId: number }
+  >()
+  let longestToolCall: { tool: string; durationMs: number; eventId: number } | null = null
   const filesSet = new Set<string>()
   const filesReadSet = new Set<string>()
   const filesEditedSet = new Set<string>()
@@ -558,7 +561,7 @@ function computeStats(events: ParsedEvent[]): SessionStatsData {
       const input = e.payload as any
       const toolUseId = typeof input?.tool_use_id === 'string' ? input.tool_use_id : null
       if (toolUseId) {
-        preToolTimestamps.set(toolUseId, { tool, timestamp: e.timestamp })
+        preToolTimestamps.set(toolUseId, { tool, timestamp: e.timestamp, eventId: e.id })
       }
 
       // Track files from tool inputs. Read tool → filesRead; Edit/Write → filesEdited.
@@ -585,7 +588,7 @@ function computeStats(events: ParsedEvent[]): SessionStatsData {
         if (pre) {
           const duration = e.timestamp - pre.timestamp
           if (!longestToolCall || duration > longestToolCall.durationMs) {
-            longestToolCall = { tool: pre.tool, durationMs: duration }
+            longestToolCall = { tool: pre.tool, durationMs: duration, eventId: pre.eventId }
           }
           // Track every duration per tool so we can compute min/median/max.
           const arr = toolDurations.get(pre.tool) ?? []
@@ -861,7 +864,16 @@ function SessionStats({ sessionId }: { sessionId: string }) {
           <span className="text-[10px] uppercase tracking-wider text-muted-foreground/60 mr-2">
             Longest tool call:
           </span>
-          {stats.longestToolCall.tool}{' '}
+          <button
+            type="button"
+            onClick={() => {
+              setScrollToEventId(stats.longestToolCall!.eventId)
+              setEditingSessionId(null)
+            }}
+            className="cursor-pointer hover:underline"
+          >
+            {stats.longestToolCall.tool}
+          </button>{' '}
           <span className="text-muted-foreground">
             ({formatDuration(stats.longestToolCall.durationMs)})
           </span>
