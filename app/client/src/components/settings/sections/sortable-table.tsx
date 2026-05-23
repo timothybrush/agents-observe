@@ -114,7 +114,7 @@ export function SortableTable<T>({
               <td
                 key={col.key}
                 className={cn(
-                  'py-1.5 px-2',
+                  'py-1.5 px-2 whitespace-nowrap',
                   col.align === 'right' && 'text-right',
                   col.className,
                 )}
