@@ -56,6 +56,10 @@ export interface TranscriptParseError {
 export interface AgentParseResult {
   calls: TranscriptCall[]
   prompts: Record<string, { text: string; timestamp: number }>
+  /** For each promptId, the timestamp of the latest jsonl line whose
+   *  parentUuid chain resolves back to that prompt. Used to compute
+   *  per-prompt duration. */
+  lastTimestampByPromptId: Record<string, number>
   subagents: TranscriptSubagent[]
   errors: TranscriptParseError[]
 }

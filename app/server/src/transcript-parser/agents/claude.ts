@@ -41,6 +41,12 @@ interface JsonlParseResult {
   firstTimestamp: number
   lastTimestamp: number
   toolCount: number
+  /** For each promptId, the timestamp of the latest line in this jsonl
+   *  whose parentUuid chain resolves back to that prompt. Used to
+   *  compute per-prompt duration as `lastTs - prompt.timestamp` — the
+   *  proper "time spent on this prompt" without bleeding in idle time
+   *  between prompts. */
+  lastTimestampByPromptId: Record<string, number>
 }
 
 /**
@@ -153,12 +159,38 @@ async function parseJsonlFile(filePath: string): Promise<JsonlParseResult> {
     }
   }
 
+  // Per-prompt last-activity timestamp. Walk every indexed line back
+  // through its parent chain to find the originating prompt, then
+  // record max(timestamp) per prompt. This captures *all* events for
+  // each prompt — assistant messages, attachments, and the tool_result
+  // user lines that mark when subagents and tools return — independent
+  // of any other prompt. Lets the duration column read "time spent on
+  // this prompt" rather than "time between prompts."
+  const lastTimestampByPromptId: Record<string, number> = {}
+  for (const [uuid, line] of lineIndex) {
+    if (line.timestamp === 0) continue
+    let cursor: string | null = uuid
+    let steps = 0
+    while (cursor && steps < maxWalkSteps) {
+      const node = lineIndex.get(cursor)
+      if (!node) break
+      if (node.promptId) {
+        const cur = lastTimestampByPromptId[node.promptId] ?? 0
+        if (line.timestamp > cur) lastTimestampByPromptId[node.promptId] = line.timestamp
+        break
+      }
+      cursor = node.parentUuid
+      steps += 1
+    }
+  }
+
   return {
     calls: [...callMap.values()],
     prompts,
     firstTimestamp: firstTimestamp === Infinity ? 0 : firstTimestamp,
     lastTimestamp,
     toolCount,
+    lastTimestampByPromptId,
   }
 }
 
@@ -247,6 +279,7 @@ export async function parseClaudeSession(
   return {
     calls: main.calls,
     prompts: main.prompts,
+    lastTimestampByPromptId: main.lastTimestampByPromptId,
     subagents,
     errors,
   }

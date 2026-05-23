@@ -18,7 +18,7 @@ export function CollapsibleSection({
   const [expanded, setExpanded] = useState(false)
   const hasDetails = details != null
   return (
-    <div className="rounded-md border border-border mb-3 overflow-hidden">
+    <div className="rounded-md border border-border mb-5 overflow-hidden">
       <div className="px-4 py-3">
         <div className="text-[10px] uppercase tracking-wider text-muted-foreground mb-2">
           {title}

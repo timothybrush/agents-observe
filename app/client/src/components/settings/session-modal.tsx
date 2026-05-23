@@ -469,24 +469,26 @@ export function SessionEditModal() {
   )
 }
 
-interface AgentTokenUsage {
+/**
+ * Per-subagent stats derived from `PostToolUse:Agent` events. Used as
+ * the always-available baseline for the Agents table — augmented (but
+ * not replaced) by transcript-stats data when that's available.
+ *
+ * `inputTokens` here is the **bundled** total (fresh + cache_read +
+ * cache_create) to match the convention the transcript-parser uses.
+ * Events do not split cache_create into 5m vs 1h — that distinction
+ * only exists in the jsonl transcript.
+ */
+export interface AgentTokenUsage {
   agentId: string
+  agentType: string | null
   description: string
   inputTokens: number
   outputTokens: number
   cacheReadTokens: number
   cacheCreationTokens: number
-  totalTokens: number
   totalDurationMs: number
   toolUseCount: number
-  toolStats: {
-    readCount: number
-    editFileCount: number
-    bashCount: number
-    searchCount: number
-    linesAdded: number
-    linesRemoved: number
-  } | null
 }
 
 export interface ToolStat {
@@ -517,9 +519,16 @@ interface SessionStatsData {
   turns: number
   agentUsage: AgentTokenUsage[]
   totalTokens: { input: number; output: number; cacheRead: number; cacheCreation: number }
+  /** Raw session duration in milliseconds (lastTs - firstTs). Used by
+   *  the Agents table as the main agent's duration when transcript
+   *  parsing isn't available. */
+  sessionDurationMs: number
+  /** Count of PreToolUse events emitted by the main session agent.
+   *  Used as the main agent's tool count in the Agents table. */
+  mainAgentToolCount: number
 }
 
-function computeStats(events: ParsedEvent[]): SessionStatsData {
+function computeStats(events: ParsedEvent[], sessionId: string): SessionStatsData {
   let toolCalls = 0
   let subagentsSpawned = 0
   let userPrompts = 0
@@ -529,13 +538,11 @@ function computeStats(events: ParsedEvent[]): SessionStatsData {
   let postToolUseCount = 0
   let postToolUseFailureCount = 0
   let turns = 0
+  let mainAgentToolCount = 0
 
   const toolCounts = new Map<string, number>()
   const toolDurations = new Map<string, number[]>()
-  const preToolTimestamps = new Map<
-    string,
-    { tool: string; timestamp: number; eventId: number }
-  >()
+  const preToolTimestamps = new Map<string, { tool: string; timestamp: number; eventId: number }>()
   let longestToolCall: { tool: string; durationMs: number; eventId: number } | null = null
   const filesSet = new Set<string>()
   const filesReadSet = new Set<string>()
@@ -555,6 +562,9 @@ function computeStats(events: ParsedEvent[]): SessionStatsData {
       toolCalls++
       const tool = eToolName || 'unknown'
       toolCounts.set(tool, (toolCounts.get(tool) || 0) + 1)
+      // Track the main agent's own tool usage separately. Subagents
+      // have their own agentId; the session root id == the main agent.
+      if (e.agentId === sessionId) mainAgentToolCount++
 
       // tool_use_id lives in payload (Claude-Code-specific key) — used
       // to pair Pre/PostToolUse for duration computation.
@@ -646,42 +656,42 @@ function computeStats(events: ParsedEvent[]): SessionStatsData {
       totalTokens.cacheCreation += cacheCreation
 
       const toolInput = (e.payload as any)?.tool_input
+      // Bundled input matches the transcript-parser convention so the
+      // events-and-transcripts merge in TokenUsageSection compares like
+      // for like.
+      const bundledInput = input + cacheRead + cacheCreation
       agentUsage.push({
         agentId: resp.agentId || 'unknown',
+        agentType: typeof resp.agentType === 'string' ? resp.agentType : null,
         description: toolInput?.description || resp.agentType || 'Agent',
-        inputTokens: input,
+        inputTokens: bundledInput,
         outputTokens: output,
         cacheReadTokens: cacheRead,
         cacheCreationTokens: cacheCreation,
-        totalTokens: resp.totalTokens ?? input + output,
         totalDurationMs: resp.totalDurationMs ?? 0,
         toolUseCount: resp.totalToolUseCount ?? 0,
-        toolStats: resp.toolStats
-          ? {
-              readCount: resp.toolStats.readCount ?? 0,
-              editFileCount: resp.toolStats.editFileCount ?? 0,
-              bashCount: resp.toolStats.bashCount ?? 0,
-              searchCount: resp.toolStats.searchCount ?? 0,
-              linesAdded: resp.toolStats.linesAdded ?? 0,
-              linesRemoved: resp.toolStats.linesRemoved ?? 0,
-            }
-          : null,
       })
     }
   }
 
-  // Sort agents by total tokens descending
-  agentUsage.sort((a, b) => b.totalTokens - a.totalTokens)
+  // Sort by duration desc — matches the events-only default sort in
+  // the Agents table. Transcripts mode re-sorts by Est Cost on render.
+  agentUsage.sort((a, b) => b.totalDurationMs - a.totalDurationMs)
 
   // Duration
   const durationMs = lastTs - firstTs
   let duration: string
   if (durationMs < 60_000) duration = `${Math.round(durationMs / 1000)}s`
   else if (durationMs < 3_600_000) duration = `${Math.round(durationMs / 60_000)}m`
-  else {
+  else if (durationMs < 86_400_000) {
     const h = Math.floor(durationMs / 3_600_000)
     const m = Math.round((durationMs % 3_600_000) / 60_000)
     duration = `${h}h ${m}m`
+  } else {
+    const d = Math.floor(durationMs / 86_400_000)
+    const h = Math.floor((durationMs % 86_400_000) / 3_600_000)
+    const m = Math.round((durationMs % 3_600_000) / 60_000)
+    duration = `${d}d ${h}h ${m}m`
   }
 
   // Tool success rate
@@ -727,6 +737,8 @@ function computeStats(events: ParsedEvent[]): SessionStatsData {
     turns,
     agentUsage,
     totalTokens,
+    sessionDurationMs: durationMs,
+    mainAgentToolCount,
   }
 }
 
@@ -738,9 +750,18 @@ function formatDuration(ms: number): string {
     const s = Math.round((ms % 60_000) / 1000)
     return s === 0 ? `${m}m` : `${m}m ${s}s`
   }
-  const h = Math.floor(ms / 3_600_000)
-  const m = Math.round((ms % 3_600_000) / 60_000)
-  return m === 0 ? `${h}h` : `${h}h ${m}m`
+  if (ms < 86_400_000) {
+    const h = Math.floor(ms / 3_600_000)
+    const m = Math.round((ms % 3_600_000) / 60_000)
+    return m === 0 ? `${h}h` : `${h}h ${m}m`
+  }
+  // Anything >= 24h: round to the nearest hour and drop minutes for a
+  // more compact column display. Carry handles the case where
+  // rounding bumps 23h up to a full day.
+  const totalHours = Math.round(ms / 3_600_000)
+  const d = Math.floor(totalHours / 24)
+  const h = totalHours % 24
+  return h === 0 ? `${d}d` : `${d}d ${h}h`
 }
 
 function SessionStats({ sessionId }: { sessionId: string }) {
@@ -762,7 +783,10 @@ function SessionStats({ sessionId }: { sessionId: string }) {
 
   const agents = useAgents(sessionId, events)
 
-  const stats = useMemo(() => (events ? computeStats(events) : null), [events])
+  const stats = useMemo(
+    () => (events ? computeStats(events, sessionId) : null),
+    [events, sessionId],
+  )
 
   // Click handlers for agent / prompt rows — close the modal and scroll
   // the event stream to the relevant event.
@@ -927,13 +951,13 @@ function SessionStats({ sessionId }: { sessionId: string }) {
                   </div>
                 </td>
                 <td className="py-1 px-2 text-right text-muted-foreground">{t.count}</td>
-                <td className="py-1 px-2 text-right text-muted-foreground border-l border-border/30">
+                <td className="py-1 px-2 text-right text-muted-foreground border-l border-border/30 whitespace-nowrap">
                   {t.minMs == null ? '—' : formatDuration(t.minMs)}
                 </td>
-                <td className="py-1 px-2 text-right text-muted-foreground">
+                <td className="py-1 px-2 text-right text-muted-foreground whitespace-nowrap">
                   {t.medianMs == null ? '—' : formatDuration(t.medianMs)}
                 </td>
-                <td className="py-1 px-2 text-right text-muted-foreground">
+                <td className="py-1 px-2 text-right text-muted-foreground whitespace-nowrap">
                   {t.maxMs == null ? '—' : formatDuration(t.maxMs)}
                 </td>
               </tr>
@@ -956,6 +980,9 @@ function SessionStats({ sessionId }: { sessionId: string }) {
         sessionId={sessionId}
         mainAgentId={sessionId}
         agents={agents}
+        eventSubagents={stats.agentUsage}
+        sessionDurationMs={stats.sessionDurationMs}
+        mainAgentToolCount={stats.mainAgentToolCount}
         onAgentClick={scrollToAgent}
         onPromptClick={scrollToPrompt}
       />

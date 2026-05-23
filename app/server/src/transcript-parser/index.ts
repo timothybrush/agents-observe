@@ -51,7 +51,13 @@ export async function parseSessionTranscripts(
 
   const subagents = attachSubagentCosts(result.subagents, pricingMap)
   const byModel = aggregateByModel(result.calls, subagents, pricingMap)
-  const prompts = aggregatePrompts(result.calls, result.prompts, subagents, pricingMap)
+  const prompts = aggregatePrompts(
+    result.calls,
+    result.prompts,
+    result.lastTimestampByPromptId,
+    subagents,
+    pricingMap,
+  )
   const summary = aggregateSummary(result.calls, subagents, pricingMap)
   const models = buildModelsMap(
     byModel.map((m) => m.model),
@@ -158,6 +164,7 @@ function aggregateByModel(
 function aggregatePrompts(
   mainCalls: TranscriptCall[],
   promptsIndex: Record<string, { text: string; timestamp: number }>,
+  lastTimestampByPromptId: Record<string, number>,
   subagents: TranscriptSubagent[],
   pricingMap: Record<string, ModelPricing>,
 ): TranscriptPrompt[] {
@@ -173,8 +180,7 @@ function aggregatePrompts(
   )
 
   const out: TranscriptPrompt[] = []
-  for (let i = 0; i < sortedPromptIds.length; i++) {
-    const promptId = sortedPromptIds[i]
+  for (const promptId of sortedPromptIds) {
     const promptMeta = promptsIndex[promptId]
     const calls = buckets.get(promptId) ?? []
     let inputTokens = 0
@@ -221,9 +227,14 @@ function aggregatePrompts(
         costCents += s.costCents
       }
     }
-    const nextTimestamp =
-      i + 1 < sortedPromptIds.length ? promptsIndex[sortedPromptIds[i + 1]].timestamp : null
-    const durationMs = nextTimestamp ? nextTimestamp - promptMeta.timestamp : null
+    // Duration is the time from the prompt submission to the latest
+    // jsonl line attributable to this prompt — the proper "time spent
+    // on this prompt" metric, independent of any other prompt's
+    // timing. Captures assistant calls, tool_result user lines (which
+    // is when subagents/tools return), and attachments.
+    const lastTs = lastTimestampByPromptId[promptId]
+    const durationMs =
+      lastTs && lastTs > promptMeta.timestamp ? lastTs - promptMeta.timestamp : null
 
     // Skip prompts that produced no LLM activity. These are Claude's
     // internal command caveats (<local-command-caveat>, etc.) that get

@@ -32,12 +32,7 @@ export interface SortableTableProps<T> {
  * the sort there in its default direction (desc for number, asc for
  * string).
  */
-export function SortableTable<T>({
-  rows,
-  columns,
-  defaultSort,
-  footer,
-}: SortableTableProps<T>) {
+export function SortableTable<T>({ rows, columns, defaultSort, footer }: SortableTableProps<T>) {
   const [sort, setSort] = useState(defaultSort)
 
   const sortedRows = useMemo(() => {
