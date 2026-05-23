@@ -33,11 +33,9 @@ import {
   ExternalLink,
 } from 'lucide-react'
 import { MoveSessionModal } from './project-modal'
-import { TokenUsageCard } from './token-usage-card'
-import { AgentLabel } from '@/components/shared/agent-label'
-import { buildAgentColorMap, getAgentColorById } from '@/lib/agent-utils'
+import { CollapsibleSection } from './sections/collapsible-section'
+import { TokenUsageSection } from './sections/token-usage-section'
 import { useAgents } from '@/hooks/use-agents'
-import { TooltipProvider } from '@/components/ui/tooltip'
 import type { Project, ParsedEvent } from '@/types'
 
 function formatRelativeTime(ts: number): string {
@@ -201,7 +199,7 @@ export function SessionEditModal() {
       >
         <DialogContent
           aria-describedby={undefined}
-          className="w-[560px] max-w-[90vw] max-h-[80vh] flex flex-col p-0"
+          className="w-[1100px] max-w-[95vw] max-h-[85vh] flex flex-col p-0"
         >
           {/* Header: session name + actions */}
           <div className="flex items-center gap-3 px-5 pt-5 pb-1">
@@ -695,16 +693,7 @@ function formatDuration(ms: number): string {
   return `${Math.round(ms / 60_000)}m`
 }
 
-function formatTokens(n: number): string {
-  if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`
-  if (n >= 1_000) return `${(n / 1_000).toFixed(1)}k`
-  return String(n)
-}
-
 function SessionStats({ sessionId }: { sessionId: string }) {
-  const setEditingSessionId = useUIStore((s) => s.setEditingSessionId)
-  const setScrollToEventId = useUIStore((s) => s.setScrollToEventId)
-
   // Stats is a point-in-time snapshot — no benefit to refetching while
   // the user looks at numbers that won't change on this view. gcTime:0
   // mirrors useEvents' deliberate "drop large payloads as soon as
@@ -719,19 +708,8 @@ function SessionStats({ sessionId }: { sessionId: string }) {
   })
 
   const agents = useAgents(sessionId, events)
-  const agentColorMap = useMemo(() => buildAgentColorMap(agents), [agents])
 
   const stats = useMemo(() => (events ? computeStats(events) : null), [events])
-
-  // Find first event for an agent (for scroll-to on click)
-  const scrollToAgent = (agentId: string) => {
-    if (!events) return
-    const first = events.find((e) => e.agentId === agentId)
-    if (first) {
-      setScrollToEventId(first.id)
-      setEditingSessionId(null) // close modal
-    }
-  }
 
   if (isLoading || !stats) {
     return (
@@ -741,22 +719,24 @@ function SessionStats({ sessionId }: { sessionId: string }) {
     )
   }
 
-  return (
-    <div className="px-5 py-4 space-y-4 text-xs overflow-y-auto max-h-[50vh]">
-      {/* Overview grid */}
+  // Overview preview: 6 cards. Expanded adds the rest + Permissions.
+  const overviewPreview = (
+    <div className="grid grid-cols-6 gap-2">
+      <StatCard label="Duration" value={stats.duration} />
+      <StatCard label="Events" value={stats.totalEvents.toLocaleString()} />
+      <StatCard label="Tool Calls" value={stats.toolCalls.toLocaleString()} />
+      <StatCard label="Prompts" value={stats.userPrompts.toLocaleString()} />
+      <StatCard label="Subagents" value={stats.subagentsSpawned.toLocaleString()} />
+      <StatCard label="Success" value={stats.toolSuccessRate} />
+    </div>
+  )
+  const overviewDetails = (
+    <div className="space-y-3">
       <div className="grid grid-cols-3 gap-3">
-        <StatCard label="Duration" value={stats.duration} />
-        <StatCard label="Events" value={stats.totalEvents.toLocaleString()} />
-        <StatCard label="Tool Calls" value={stats.toolCalls.toLocaleString()} />
-        <StatCard label="User Prompts" value={stats.userPrompts.toLocaleString()} />
         <StatCard label="Turns" value={stats.turns.toLocaleString()} />
-        <StatCard label="Subagents" value={stats.subagentsSpawned.toLocaleString()} />
         <StatCard label="Git Commits" value={stats.gitCommits.toLocaleString()} />
         <StatCard label="Files Touched" value={stats.filesTouched.toLocaleString()} />
-        <StatCard label="Success Rate" value={stats.toolSuccessRate} />
       </div>
-
-      {/* Permissions */}
       {(stats.permissionRequests > 0 || stats.permissionDenials > 0) && (
         <div>
           <div className="text-[10px] uppercase tracking-wider text-muted-foreground/60 mb-1.5">
@@ -768,15 +748,19 @@ function SessionStats({ sessionId }: { sessionId: string }) {
           </div>
         </div>
       )}
+    </div>
+  )
 
-      {/* Top tools */}
+  // Tool Usage preview: top tools bar chart + longest tool call.
+  const toolUsagePreview = (
+    <div className="space-y-2">
       {stats.topTools.length > 0 && (
         <div>
           <div className="text-[10px] uppercase tracking-wider text-muted-foreground/60 mb-1.5">
             Top Tools
           </div>
           <div className="space-y-1">
-            {stats.topTools.map(({ name, count }) => {
+            {stats.topTools.slice(0, 6).map(({ name, count }) => {
               const pct = stats.toolCalls > 0 ? (count / stats.toolCalls) * 100 : 0
               return (
                 <div key={name} className="flex items-center gap-2">
@@ -794,129 +778,49 @@ function SessionStats({ sessionId }: { sessionId: string }) {
           </div>
         </div>
       )}
-
-      {/* Longest tool call */}
       {stats.longestToolCall && (
-        <div>
-          <div className="text-[10px] uppercase tracking-wider text-muted-foreground/60 mb-1.5">
-            Longest Tool Call
-          </div>
-          <div className="text-sm">
-            {stats.longestToolCall.tool}{' '}
-            <span className="text-muted-foreground">
-              ({formatDuration(stats.longestToolCall.durationMs)})
-            </span>
-          </div>
+        <div className="text-sm">
+          <span className="text-[10px] uppercase tracking-wider text-muted-foreground/60 mr-2">
+            Longest tool call:
+          </span>
+          {stats.longestToolCall.tool}{' '}
+          <span className="text-muted-foreground">
+            ({formatDuration(stats.longestToolCall.durationMs)})
+          </span>
         </div>
       )}
-
-      {/* Token usage */}
-      {(stats.totalTokens.input > 0 || stats.totalTokens.output > 0) && (
-        <div>
-          <div className="text-[10px] uppercase tracking-wider text-muted-foreground/60 mb-1.5">
-            Token Usage (Subagents)
-          </div>
-          <div className="grid grid-cols-3 gap-3 mb-3">
-            <StatCard
-              label="Total Input"
-              value={formatTokens(
-                stats.totalTokens.input +
-                  stats.totalTokens.cacheRead +
-                  stats.totalTokens.cacheCreation,
-              )}
-            />
-            <StatCard label="Total Output" value={formatTokens(stats.totalTokens.output)} />
-            <StatCard
-              label="Cache Hit Rate"
-              value={
-                stats.totalTokens.input +
-                  stats.totalTokens.cacheRead +
-                  stats.totalTokens.cacheCreation >
-                0
-                  ? `${Math.round(
-                      (stats.totalTokens.cacheRead /
-                        (stats.totalTokens.input +
-                          stats.totalTokens.cacheRead +
-                          stats.totalTokens.cacheCreation)) *
-                        100,
-                    )}%`
-                  : '—'
-              }
-            />
-          </div>
-          {stats.agentUsage.length > 0 && (
-            <TooltipProvider>
-              <div className="rounded-md border border-border/50 overflow-hidden">
-                <table className="w-full text-[10px]">
-                  <thead>
-                    <tr className="bg-muted/30 text-muted-foreground">
-                      <th className="text-left px-2 py-1.5 font-medium">Agent</th>
-                      <th className="text-right px-2 py-1.5 font-medium">Input</th>
-                      <th className="text-right px-2 py-1.5 font-medium">Output</th>
-                      <th className="text-right px-2 py-1.5 font-medium">Cache Hit</th>
-                      <th className="text-right px-2 py-1.5 font-medium">Tools</th>
-                      <th className="text-right px-2 py-1.5 font-medium">Time</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {stats.agentUsage.map((agent) => {
-                      const totalInput =
-                        agent.inputTokens + agent.cacheReadTokens + agent.cacheCreationTokens
-                      const cacheHitPct =
-                        totalInput > 0
-                          ? `${Math.round((agent.cacheReadTokens / totalInput) * 100)}%`
-                          : '—'
-                      const agentObj = agents.find((a) => a.id === agent.agentId)
-                      const parentAgent = agentObj?.parentAgentId
-                        ? agents.find((a) => a.id === agentObj.parentAgentId)
-                        : null
-                      const color = getAgentColorById(agent.agentId, agentColorMap)
-                      return (
-                        <tr key={agent.agentId} className="border-t border-border/30">
-                          <td className="px-2 py-1.5 truncate max-w-[200px]">
-                            {agentObj ? (
-                              <button
-                                className={`truncate cursor-pointer hover:underline ${color.textOnly}`}
-                                onClick={() => scrollToAgent(agent.agentId)}
-                              >
-                                <AgentLabel agent={agentObj} parentAgent={parentAgent} />
-                              </button>
-                            ) : (
-                              <span className="truncate" title={agent.description}>
-                                {agent.description}
-                              </span>
-                            )}
-                          </td>
-                          <td className="text-right px-2 py-1.5 text-muted-foreground">
-                            {formatTokens(totalInput)}
-                          </td>
-                          <td className="text-right px-2 py-1.5 text-muted-foreground">
-                            {formatTokens(agent.outputTokens)}
-                          </td>
-                          <td className="text-right px-2 py-1.5 text-muted-foreground">
-                            {cacheHitPct}
-                          </td>
-                          <td className="text-right px-2 py-1.5 text-muted-foreground">
-                            {agent.toolUseCount}
-                          </td>
-                          <td className="text-right px-2 py-1.5 text-muted-foreground">
-                            {formatDuration(agent.totalDurationMs)}
-                          </td>
-                        </tr>
-                      )
-                    })}
-                  </tbody>
-                </table>
+    </div>
+  )
+  const toolUsageDetails =
+    stats.topTools.length > 6 ? (
+      <div className="space-y-1">
+        <div className="text-[10px] uppercase tracking-wider text-muted-foreground/60 mb-1.5">
+          All Tools
+        </div>
+        {stats.topTools.slice(6).map(({ name, count }) => {
+          const pct = stats.toolCalls > 0 ? (count / stats.toolCalls) * 100 : 0
+          return (
+            <div key={name} className="flex items-center gap-2">
+              <span className="w-20 truncate text-muted-foreground">{name}</span>
+              <div className="flex-1 h-3 rounded-full bg-muted/50 overflow-hidden">
+                <div className="h-full rounded-full bg-primary/40" style={{ width: `${pct}%` }} />
               </div>
-            </TooltipProvider>
-          )}
-        </div>
-      )}
+              <span className="w-8 text-right text-muted-foreground/70">{count}</span>
+            </div>
+          )
+        })}
+      </div>
+    ) : null
 
-      {/* Main-agent token stats from the on-disk transcript jsonl.
-          Opt-in via AGENTS_OBSERVE_TRANSCRIPT_STATS=1 on the server;
-          renders an informative disabled message otherwise. */}
-      <TokenUsageCard sessionId={sessionId} />
+  return (
+    <div className="px-5 py-4 text-xs overflow-y-auto max-h-[60vh]">
+      <CollapsibleSection title="Overview" preview={overviewPreview} details={overviewDetails} />
+      <CollapsibleSection
+        title="Tool Usage"
+        preview={toolUsagePreview}
+        details={toolUsageDetails}
+      />
+      <TokenUsageSection sessionId={sessionId} agents={agents} />
     </div>
   )
 }

@@ -1,0 +1,95 @@
+import { Tooltip, TooltipTrigger, TooltipContent, TooltipProvider } from '@/components/ui/tooltip'
+import type { TranscriptStatsModelPricing } from '@/lib/api-client'
+
+/**
+ * Format a model id for badge display: strip "claude-" prefix,
+ * convert version dashes (4-7) to dots (4.7), strip any trailing
+ * 8-digit date suffix.
+ */
+export function formatModelLabel(modelId: string): string {
+  let s = modelId
+  if (s.startsWith('claude-')) s = s.slice('claude-'.length)
+  // Strip trailing -YYYYMMDD
+  s = s.replace(/-\d{8}$/, '')
+  // Convert version dashes (digit-dash-digit) to dots.
+  s = s.replace(/(\d)-(\d)/g, '$1.$2')
+  return s
+}
+
+function fmtUsd(n: number): string {
+  return `$${n.toFixed(2)}`
+}
+
+export function ModelBadge({
+  modelId,
+  effort,
+  pricing,
+}: {
+  modelId: string
+  effort?: string | null
+  pricing?: TranscriptStatsModelPricing | null
+}) {
+  const label = formatModelLabel(modelId)
+  return (
+    <TooltipProvider delayDuration={300}>
+      <Tooltip>
+        <TooltipTrigger asChild>
+          <span
+            data-testid="model-badge"
+            data-model-id={modelId}
+            className="inline-flex items-center text-[11px] font-mono px-1.5 py-0.5 rounded bg-slate-800 text-blue-300 cursor-help"
+          >
+            {label}
+            {effort ? <span className="ml-1 text-[9px] text-slate-300">{effort}</span> : null}
+          </span>
+        </TooltipTrigger>
+        <TooltipContent side="bottom" align="start" className="max-w-xs">
+          <div className="font-mono text-[11px] text-foreground mb-1">{modelId}</div>
+          {effort && (
+            <div className="text-[10px] text-muted-foreground mb-2">
+              Reasoning effort: <span className="text-slate-300">{effort}</span>
+            </div>
+          )}
+          {pricing ? (
+            <>
+              <div className="text-[9px] uppercase tracking-wide text-muted-foreground mb-1">
+                Pricing · per million tokens
+              </div>
+              <table className="w-full font-mono text-[11px]">
+                <tbody>
+                  <tr>
+                    <td className="text-muted-foreground py-0.5">Input</td>
+                    <td className="text-right">{fmtUsd(pricing.inputPerM)}</td>
+                  </tr>
+                  <tr>
+                    <td className="text-muted-foreground py-0.5">Output</td>
+                    <td className="text-right">{fmtUsd(pricing.outputPerM)}</td>
+                  </tr>
+                  <tr>
+                    <td className="text-muted-foreground py-0.5">Cache read</td>
+                    <td className="text-right">{fmtUsd(pricing.cacheReadPerM)}</td>
+                  </tr>
+                  <tr>
+                    <td className="text-muted-foreground py-0.5">Cache write (5m)</td>
+                    <td className="text-right">{fmtUsd(pricing.cacheCreate5mPerM)}</td>
+                  </tr>
+                  <tr>
+                    <td className="text-muted-foreground py-0.5">Cache write (1h)</td>
+                    <td className="text-right">{fmtUsd(pricing.cacheCreate1hPerM)}</td>
+                  </tr>
+                </tbody>
+              </table>
+              <div className="mt-2 text-[9px] italic text-muted-foreground">
+                Pricing from models.dev · refreshed daily
+              </div>
+            </>
+          ) : (
+            <div className="text-[10px] text-muted-foreground italic">
+              Pricing not available for this model.
+            </div>
+          )}
+        </TooltipContent>
+      </Tooltip>
+    </TooltipProvider>
+  )
+}

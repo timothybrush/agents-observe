@@ -249,42 +249,78 @@ export const api = {
   },
 }
 
-// ── Transcript stats types ────────────────────────────────────────
+// ── Transcript stats types (V2: matches server transcript-parser) ──
 
-export interface TranscriptStatsUsage {
+export interface TranscriptStatsByModel {
+  model: string
+  calls: number
   inputTokens: number
   outputTokens: number
   cacheReadTokens: number
   cacheCreate5mTokens: number
   cacheCreate1hTokens: number
+  costCents: number | null
 }
 
-export interface TranscriptStatsByModel extends TranscriptStatsUsage {
-  model: string
-  calls: number
-}
-
-export interface TranscriptStatsCall {
-  messageId: string
-  requestId: string | null
+export interface TranscriptStatsPrompt {
+  promptId: string
+  text: string
   timestamp: number
+  durationMs: number | null
+  toolCount: number
+  requests: number
+  inputTokens: number
+  outputTokens: number
+  models: string[]
+  costCents: number | null
+}
+
+export interface TranscriptStatsSubagent {
+  agentId: string
+  agentType: string | null
+  description: string | null
+  toolUseId: string | null
   model: string
-  isSidechain: boolean
-  serviceTier: string | null
-  stopReason: string | null
-  usage: TranscriptStatsUsage
-  toolUseIds: string[]
-  promptId: string | null
+  requests: number
+  inputTokens: number
+  outputTokens: number
+  cacheReadTokens: number
+  cacheCreate5mTokens: number
+  cacheCreate1hTokens: number
+  durationMs: number
+  toolCount: number
+  costCents: number | null
+}
+
+export interface TranscriptStatsModelPricing {
+  inputPerM: number
+  outputPerM: number
+  cacheReadPerM: number
+  cacheCreate5mPerM: number
+  cacheCreate1hPerM: number
+}
+
+export interface TranscriptStatsParseError {
+  scope: 'main' | 'subagent'
+  agentId?: string
+  code: 'missing' | 'unreadable' | 'parse_error'
+  message: string
 }
 
 export interface TranscriptStatsData {
   source: 'jsonl'
   summary: {
     totalCalls: number
-    byModel: TranscriptStatsByModel[]
+    inputTotal: number
+    outputTotal: number
+    cacheHitRate: number
+    costTotalCents: number | null
   }
-  calls: TranscriptStatsCall[]
-  prompts: Record<string, { text: string; timestamp: number }>
+  byModel: TranscriptStatsByModel[]
+  prompts: TranscriptStatsPrompt[]
+  subagents: TranscriptStatsSubagent[]
+  models: Record<string, { pricing: TranscriptStatsModelPricing | null }>
+  errors: TranscriptStatsParseError[]
 }
 
 export type TranscriptStatsErrorCode =
