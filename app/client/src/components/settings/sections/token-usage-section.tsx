@@ -35,17 +35,21 @@ function fmtUsd(n: number, decimals = 4): string {
 }
 
 /**
- * Tooltip-wrapped cost cell that, when present pricing + breakdown,
- * shows a mini table of the cost calculation:
- *   line item  ×  rate  =  $X.XXXX
+ * Tooltip-wrapped cost cell. Two modes:
  *
- * Falls back to the bare cost string (clickable cursor: help) when
- * pricing isn't known. Pass `inputTokens` as the BUNDLED input
- * (server returns it that way) — fresh = bundled - cacheRead - cacheWrite.
+ * - **Single-model** (one pricing object): renders a mini table with
+ *   per-line cost computed at the model's rate.
+ * - **Multi-model** (array of pricings): the per-line cost column is
+ *   omitted (the bundled tokens can't be split cleanly across models);
+ *   the Rate column shows a range (min–max across models). Total at
+ *   the bottom is the server-computed total — accurate even though
+ *   per-line is just an approximation.
+ *
+ * Falls back to the bare cost string when pricing is fully unknown.
  */
 function CostCell({
   costCents,
-  pricing,
+  pricings,
   inputTokens,
   outputTokens,
   cacheReadTokens,
@@ -53,7 +57,8 @@ function CostCell({
   cacheCreate1hTokens,
 }: {
   costCents: number | null
-  pricing: TranscriptStatsModelPricing | null
+  /** One pricing for single-model rows, multiple for multi-model (prompts). */
+  pricings: TranscriptStatsModelPricing[]
   /** Bundled input (fresh + cache_read + cache_write). */
   inputTokens: number
   outputTokens: number
@@ -61,46 +66,65 @@ function CostCell({
   cacheCreate5mTokens: number
   cacheCreate1hTokens: number
 }) {
-  if (costCents == null || !pricing) {
+  if (costCents == null || pricings.length === 0) {
     return <span className="text-amber-500">{fmtCents(costCents)}</span>
   }
   const fresh = Math.max(
     0,
     inputTokens - cacheReadTokens - cacheCreate5mTokens - cacheCreate1hTokens,
   )
-  const lines: Array<{ label: string; tokens: number; rate: number; cost: number }> = [
+  const multi = pricings.length > 1
+
+  // For single-model: rate is a single number. For multi-model: format as a range.
+  function fmtRate(values: number[]): string {
+    if (values.length === 0) return '—'
+    const min = Math.min(...values)
+    const max = Math.max(...values)
+    if (min === max) return `$${min.toFixed(2)}`
+    return `$${min.toFixed(2)}–$${max.toFixed(2)}`
+  }
+
+  const lines: Array<{
+    label: string
+    tokens: number
+    rates: number[]
+    /** Per-line cost in $ — only meaningful for single-model. */
+    cost: number
+  }> = [
     {
       label: 'Input',
       tokens: fresh,
-      rate: pricing.inputPerM,
-      cost: (fresh * pricing.inputPerM) / 1_000_000,
+      rates: pricings.map((p) => p.inputPerM),
+      cost: (fresh * pricings[0].inputPerM) / 1_000_000,
     },
     {
       label: 'Output',
       tokens: outputTokens,
-      rate: pricing.outputPerM,
-      cost: (outputTokens * pricing.outputPerM) / 1_000_000,
+      rates: pricings.map((p) => p.outputPerM),
+      cost: (outputTokens * pricings[0].outputPerM) / 1_000_000,
     },
     {
       label: 'Cache read',
       tokens: cacheReadTokens,
-      rate: pricing.cacheReadPerM,
-      cost: (cacheReadTokens * pricing.cacheReadPerM) / 1_000_000,
+      rates: pricings.map((p) => p.cacheReadPerM),
+      cost: (cacheReadTokens * pricings[0].cacheReadPerM) / 1_000_000,
     },
     {
       label: 'Cache write (5m)',
       tokens: cacheCreate5mTokens,
-      rate: pricing.cacheCreate5mPerM,
-      cost: (cacheCreate5mTokens * pricing.cacheCreate5mPerM) / 1_000_000,
+      rates: pricings.map((p) => p.cacheCreate5mPerM),
+      cost: (cacheCreate5mTokens * pricings[0].cacheCreate5mPerM) / 1_000_000,
     },
     {
       label: 'Cache write (1h)',
       tokens: cacheCreate1hTokens,
-      rate: pricing.cacheCreate1hPerM,
-      cost: (cacheCreate1hTokens * pricing.cacheCreate1hPerM) / 1_000_000,
+      rates: pricings.map((p) => p.cacheCreate1hPerM),
+      cost: (cacheCreate1hTokens * pricings[0].cacheCreate1hPerM) / 1_000_000,
     },
   ]
   const total = costCents / 100
+  // Column count for the Total row's colSpan.
+  const totalColSpan = multi ? 2 : 3
   return (
     <TooltipProvider delayDuration={300}>
       <Tooltip>
@@ -112,34 +136,39 @@ function CostCell({
           align="start"
           className="!bg-popover !text-popover-foreground border border-border max-w-md p-3 shadow-md"
         >
-          <div className="text-[9px] uppercase tracking-wide text-muted-foreground mb-1.5">
-            Cost breakdown
+          <div className="text-[9px] uppercase tracking-wide text-muted-foreground mb-2">
+            Cost breakdown{multi && ' · multiple models'}
           </div>
-          <table className="w-full font-mono text-[11px]">
+          <table className="font-mono text-[11px] border-separate" style={{ borderSpacing: '0 0' }}>
             <thead>
               <tr className="text-muted-foreground">
-                <th className="text-left font-normal pb-1">Item</th>
-                <th className="text-right font-normal pb-1 pl-3">Tokens</th>
-                <th className="text-right font-normal pb-1 pl-3">Rate</th>
-                <th className="text-right font-normal pb-1 pl-3">Cost</th>
+                <th className="text-left font-normal pb-1.5 pr-4">Item</th>
+                <th className="text-right font-normal pb-1.5 px-4">Tokens</th>
+                <th className="text-right font-normal pb-1.5 px-4">Rate ($/M)</th>
+                {!multi && <th className="text-right font-normal pb-1.5 pl-4">Cost</th>}
               </tr>
             </thead>
             <tbody>
               {lines.map((l) => (
                 <tr key={l.label}>
-                  <td className="py-0.5 text-muted-foreground">{l.label}</td>
-                  <td className="py-0.5 text-right">{l.tokens.toLocaleString()}</td>
-                  <td className="py-0.5 text-right text-muted-foreground">
-                    ${l.rate.toFixed(2)}/M
+                  <td className="py-0.5 pr-4 text-muted-foreground">{l.label}</td>
+                  <td className="py-0.5 px-4 text-right">{l.tokens.toLocaleString()}</td>
+                  <td className="py-0.5 px-4 text-right text-muted-foreground">
+                    {fmtRate(l.rates)}
                   </td>
-                  <td className="py-0.5 text-right">{fmtUsd(l.cost)}</td>
+                  {!multi && <td className="py-0.5 pl-4 text-right">{fmtUsd(l.cost)}</td>}
                 </tr>
               ))}
               <tr className="border-t border-border/40">
-                <td className="pt-1.5 text-muted-foreground uppercase text-[9px]" colSpan={3}>
+                <td
+                  className="pt-2 text-muted-foreground uppercase text-[9px] pr-4"
+                  colSpan={totalColSpan}
+                >
                   Total
                 </td>
-                <td className="pt-1.5 text-right text-amber-500 font-medium">{fmtUsd(total, 2)}</td>
+                <td className={`pt-2 text-right text-amber-500 font-medium ${multi ? 'px-4' : 'pl-4'}`}>
+                  {fmtUsd(total, 2)}
+                </td>
               </tr>
             </tbody>
           </table>
@@ -345,17 +374,20 @@ export function TokenUsageSection({
       label: 'Est Cost',
       sortType: 'number',
       align: 'right',
-      render: (r) => (
-        <CostCell
-          costCents={r.costCents}
-          pricing={stats.models[r.model]?.pricing ?? null}
-          inputTokens={r.inputTokens}
-          outputTokens={r.outputTokens}
-          cacheReadTokens={r.cacheReadTokens}
-          cacheCreate5mTokens={r.cacheCreate5mTokens}
-          cacheCreate1hTokens={r.cacheCreate1hTokens}
-        />
-      ),
+      render: (r) => {
+        const p = stats.models[r.model]?.pricing
+        return (
+          <CostCell
+            costCents={r.costCents}
+            pricings={p ? [p] : []}
+            inputTokens={r.inputTokens}
+            outputTokens={r.outputTokens}
+            cacheReadTokens={r.cacheReadTokens}
+            cacheCreate5mTokens={r.cacheCreate5mTokens}
+            cacheCreate1hTokens={r.cacheCreate1hTokens}
+          />
+        )
+      },
       sortValue: (r) => r.costCents ?? 0,
       className: 'border-l border-border/30',
     },
@@ -437,7 +469,22 @@ export function TokenUsageSection({
       label: 'Est Cost',
       sortType: 'number',
       align: 'right',
-      render: (r) => <span className="text-amber-500">{fmtCents(r.costCents)}</span>,
+      render: (r) => {
+        const pricings = r.models
+          .map((m) => stats.models[m]?.pricing)
+          .filter((p): p is NonNullable<typeof p> => !!p)
+        return (
+          <CostCell
+            costCents={r.costCents}
+            pricings={pricings}
+            inputTokens={r.inputTokens}
+            outputTokens={r.outputTokens}
+            cacheReadTokens={r.cacheReadTokens}
+            cacheCreate5mTokens={r.cacheCreate5mTokens}
+            cacheCreate1hTokens={r.cacheCreate1hTokens}
+          />
+        )
+      },
       sortValue: (r) => r.costCents ?? 0,
     },
   ]
@@ -627,17 +674,20 @@ export function TokenUsageSection({
       label: 'Est Cost',
       sortType: 'number',
       align: 'right',
-      render: (r) => (
-        <CostCell
-          costCents={r.costCents}
-          pricing={r.model ? stats.models[r.model]?.pricing ?? null : null}
-          inputTokens={r.inputTokens}
-          outputTokens={r.outputTokens}
-          cacheReadTokens={r.cacheReadTokens}
-          cacheCreate5mTokens={r.cacheCreate5mTokens}
-          cacheCreate1hTokens={r.cacheCreate1hTokens}
-        />
-      ),
+      render: (r) => {
+        const p = r.model ? stats.models[r.model]?.pricing : null
+        return (
+          <CostCell
+            costCents={r.costCents}
+            pricings={p ? [p] : []}
+            inputTokens={r.inputTokens}
+            outputTokens={r.outputTokens}
+            cacheReadTokens={r.cacheReadTokens}
+            cacheCreate5mTokens={r.cacheCreate5mTokens}
+            cacheCreate1hTokens={r.cacheCreate1hTokens}
+          />
+        )
+      },
       sortValue: (r) => r.costCents ?? 0,
     },
   ]

@@ -179,6 +179,9 @@ function aggregatePrompts(
     const calls = buckets.get(promptId) ?? []
     let inputTokens = 0
     let outputTokens = 0
+    let cacheReadTokens = 0
+    let cacheCreate5mTokens = 0
+    let cacheCreate1hTokens = 0
     let toolCount = 0
     const models = new Set<string>()
     let costCents: number | null = 0
@@ -189,6 +192,9 @@ function aggregatePrompts(
         c.usage.cacheCreate5mTokens +
         c.usage.cacheCreate1hTokens
       outputTokens += c.usage.outputTokens
+      cacheReadTokens += c.usage.cacheReadTokens
+      cacheCreate5mTokens += c.usage.cacheCreate5mTokens
+      cacheCreate1hTokens += c.usage.cacheCreate1hTokens
       toolCount += c.toolUseIds.length
       if (c.model) models.add(c.model)
       const pricing = pricingMap[c.model]
@@ -205,6 +211,9 @@ function aggregatePrompts(
       if (!owner || owner.promptId !== promptId) continue
       inputTokens += s.inputTokens
       outputTokens += s.outputTokens
+      cacheReadTokens += s.cacheReadTokens
+      cacheCreate5mTokens += s.cacheCreate5mTokens
+      cacheCreate1hTokens += s.cacheCreate1hTokens
       if (s.model) models.add(s.model)
       if (s.costCents == null) {
         costCents = null
@@ -225,6 +234,9 @@ function aggregatePrompts(
       requests: calls.length,
       inputTokens,
       outputTokens,
+      cacheReadTokens,
+      cacheCreate5mTokens,
+      cacheCreate1hTokens,
       models: [...models],
       costCents,
     })

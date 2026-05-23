@@ -67,8 +67,13 @@ export interface TranscriptPrompt {
   durationMs: number | null
   toolCount: number
   requests: number
+  /** Bundled input (fresh + cache_read + cache_write). */
   inputTokens: number
   outputTokens: number
+  /** Cache breakdown — same shape as byModel rows so the UI can render a per-line cost tooltip. */
+  cacheReadTokens: number
+  cacheCreate5mTokens: number
+  cacheCreate1hTokens: number
   models: string[]
   costCents: number | null
 }

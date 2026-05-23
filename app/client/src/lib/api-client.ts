@@ -269,8 +269,12 @@ export interface TranscriptStatsPrompt {
   durationMs: number | null
   toolCount: number
   requests: number
+  /** Bundled input (fresh + cache_read + cache_write). */
   inputTokens: number
   outputTokens: number
+  cacheReadTokens: number
+  cacheCreate5mTokens: number
+  cacheCreate1hTokens: number
   models: string[]
   costCents: number | null
 }
