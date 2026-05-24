@@ -181,8 +181,11 @@ describe('parseSessionTranscripts', () => {
     const store = makeStore({ agents: [{ id: 'sess1', agent_class: 'claude-code' }] })
     const stats = await parseSessionTranscripts('sess1', store, path)
 
-    const p1 = stats.prompts.find((p) => p.promptId === 'p1')!
-    const p2 = stats.prompts.find((p) => p.promptId === 'p2')!
+    // promptId in the API response is now the canonical user-prompt
+    // line's uuid (claude-code) — stable across resumes. For codex it's
+    // still the turn_id. See claude.ts walk → node.uuid.
+    const p1 = stats.prompts.find((p) => p.promptId === 'u1')!
+    const p2 = stats.prompts.find((p) => p.promptId === 'u2')!
     expect(p1.durationMs).toBe(10_000) // +10s from prompt to last activity
     expect(p2.durationMs).toBe(3_000) // +3s from prompt to last activity
     // The gap between prompts (600s) must NOT appear anywhere.
@@ -197,7 +200,7 @@ describe('parseSessionTranscripts', () => {
     const path = writeMainFixture()
     const store = makeStore({ agents: [{ id: 'sess1', agent_class: 'claude-code' }] })
     const stats = await parseSessionTranscripts('sess1', store, path)
-    const prompt = stats.prompts.find((p) => p.promptId === 'p1')!
+    const prompt = stats.prompts.find((p) => p.promptId === 'u1')!
     expect(prompt.durationMs).not.toBeNull()
     expect(prompt.durationMs).toBe(1_000) // 1s between user line and assistant line
   })

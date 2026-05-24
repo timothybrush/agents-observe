@@ -100,7 +100,10 @@ describe('parseClaudeSession — main only', () => {
     expect(result.calls).toHaveLength(1)
     expect(result.calls[0].messageId).toBe('msg1')
     expect(result.calls[0].toolUseIds).toEqual(['toolu_1', 'toolu_2'])
-    expect(result.calls[0].promptId).toBe('p1')
+    // promptId is now the canonical uuid of the user-prompt line
+    // (was the JSONL's promptId field). See claude.ts: switching to
+    // uuid sidesteps the resume-replay bug where promptId is re-minted.
+    expect(result.calls[0].promptId).toBe('u1')
     expect(result.calls[0].requestId).toBe('req_aaaa')
     expect(result.calls[0].serviceTier).toBe('standard')
     expect(result.calls[0].stopReason).toBe('tool_use')
@@ -111,7 +114,8 @@ describe('parseClaudeSession — main only', () => {
       cacheCreate5mTokens: 0,
       cacheCreate1hTokens: 20,
     })
-    expect(result.prompts.p1.text).toBe('hello world')
+    // prompts index is now keyed by the user-prompt line's uuid.
+    expect(result.prompts.u1.text).toBe('hello world')
     expect(result.subagents).toHaveLength(0)
     expect(result.errors).toHaveLength(0)
   })
@@ -122,7 +126,7 @@ describe('parseClaudeSession — main only', () => {
     // 2026-05-22T00:00:02.000Z. parseClaudeSession should attribute that
     // (via parentUuid chain) back to p1.
     const expectedLastTs = Date.parse('2026-05-22T00:00:02.000Z')
-    expect(result.lastTimestampByPromptId.p1).toBe(expectedLastTs)
+    expect(result.lastTimestampByPromptId.u1).toBe(expectedLastTs)
   })
 
   test('lastTimestampByPromptId walks multi-hop parentUuid chains', async () => {
@@ -130,7 +134,7 @@ describe('parseClaudeSession — main only', () => {
     // The deepest descendant must still attribute back to p1. The latest
     // descendant's timestamp must dominate over earlier ones.
     const result = await parseClaudeSession(FIXTURE_PATH)
-    expect(result.lastTimestampByPromptId.p1).toBeGreaterThan(
+    expect(result.lastTimestampByPromptId.u1).toBeGreaterThan(
       Date.parse('2026-05-22T00:00:01.500Z'), // beats the last assistant ts
     )
   })
@@ -197,14 +201,14 @@ describe('parseClaudeSession — main only', () => {
     // p1's last activity must be its OWN assistant call (T+10s), not
     // anything from p2's window — even though p2's lines exist later
     // in the same file.
-    expect(result.lastTimestampByPromptId.p1).toBe(Date.parse('2026-06-01T00:00:10.000Z'))
+    expect(result.lastTimestampByPromptId.u1).toBe(Date.parse('2026-06-01T00:00:10.000Z'))
     // p2's last activity is its own assistant call at T+613s, not the
-    // session's tail.
-    expect(result.lastTimestampByPromptId.p2).toBe(Date.parse('2026-06-01T00:10:13.000Z'))
+    // session's tail. Keyed by uuid `u2` (the second user prompt line).
+    expect(result.lastTimestampByPromptId.u2).toBe(Date.parse('2026-06-01T00:10:13.000Z'))
 
     // Sanity: the idle gap between prompts (600s) is NOT included in
     // p1's activity span.
-    const p1Span = result.lastTimestampByPromptId.p1 - Date.parse('2026-06-01T00:00:00.000Z')
+    const p1Span = result.lastTimestampByPromptId.u1 - Date.parse('2026-06-01T00:00:00.000Z')
     expect(p1Span).toBe(10_000)
   })
 
@@ -365,6 +369,56 @@ describe('parseClaudeSession — tool stats', () => {
     // startedAt + durationMs from the main JSONL timestamps.
     expect(result.startedAt).toBe(Date.parse('2026-07-01T00:00:00.000Z'))
     expect(result.durationMs).toBe(4_000)
+  })
+
+  test('prompts table dedups resume-replays: same uuid + new promptId per replay collapses to one row', async () => {
+    // Reproduces the prompts-table bug: a session resumed twice has the
+    // same user-prompt line emitted three times with the same uuid +
+    // text but three different promptIds. The OLD parser keyed prompts
+    // by promptId → produced 3 separate rows of which 2 had zero calls
+    // and got dropped. The NEW parser keys by uuid → one row, all
+    // assistant calls correctly attribute to it.
+    const lines = [
+      {
+        type: 'user',
+        uuid: 'u-prompt',
+        parentUuid: null,
+        promptId: 'pid-replay1',
+        timestamp: '2026-07-01T00:00:00.000Z',
+        message: { content: 'do the thing' },
+      },
+      {
+        type: 'user',
+        uuid: 'u-prompt',
+        parentUuid: null,
+        promptId: 'pid-replay2',
+        timestamp: '2026-07-01T00:00:00.000Z',
+        message: { content: 'do the thing' },
+      },
+      {
+        type: 'assistant',
+        uuid: 'a1',
+        parentUuid: 'u-prompt',
+        timestamp: '2026-07-01T00:00:01.000Z',
+        isSidechain: false,
+        message: {
+          id: 'm1',
+          model: 'claude-opus-4-7',
+          usage: { input_tokens: 1, output_tokens: 1 },
+          content: [{ type: 'text', text: 'sure' }],
+        },
+      },
+    ]
+    const path = join(TMP_DIR, 'replay.jsonl')
+    writeFileSync(path, lines.map((l) => JSON.stringify(l)).join('\n') + '\n')
+
+    const result = await parseClaudeSession(path)
+    // One canonical entry keyed by uuid, even though two promptIds
+    // appeared in the user lines.
+    expect(Object.keys(result.prompts)).toEqual(['u-prompt'])
+    // The assistant call attributes to the same uuid.
+    expect(result.calls).toHaveLength(1)
+    expect(result.calls[0].promptId).toBe('u-prompt')
   })
 
   test('userPrompts dedups resume-replays by uuid and filters internal injects', async () => {

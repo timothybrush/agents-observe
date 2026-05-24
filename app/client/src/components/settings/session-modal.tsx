@@ -818,6 +818,20 @@ function SessionStats({ sessionId }: { sessionId: string }) {
 
   const agents = useAgents(sessionId, events)
 
+  // Set of prompt texts the plugin captured a UserPromptSubmit event
+  // for. Lets the prompts table render rows without a matching event
+  // (pre-plugin prompts on resumed sessions) as muted/non-clickable.
+  const eventPromptTexts = useMemo(() => {
+    const s = new Set<string>()
+    if (!events) return s
+    for (const e of events) {
+      if (e.hookName !== 'UserPromptSubmit') continue
+      const p = (e.payload as any)?.prompt
+      if (typeof p === 'string') s.add(p)
+    }
+    return s
+  }, [events])
+
   // Transcript stats — same query key as TokenUsageSection so the
   // round-trip is deduped. When the server flag is off (or the
   // transcript file is missing) data is undefined and we render
@@ -1048,6 +1062,7 @@ function SessionStats({ sessionId }: { sessionId: string }) {
         mainAgentToolCount={stats.mainAgentToolCount}
         onAgentClick={scrollToAgent}
         onPromptClick={scrollToPrompt}
+        eventPromptTexts={eventPromptTexts}
       />
     </div>
   )

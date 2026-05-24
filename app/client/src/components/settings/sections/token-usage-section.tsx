@@ -276,6 +276,7 @@ export function TokenUsageSection({
   mainAgentToolCount,
   onAgentClick,
   onPromptClick,
+  eventPromptTexts,
 }: {
   sessionId: string
   /** Agent id of the main session agent (== session id for claude-code). */
@@ -292,6 +293,11 @@ export function TokenUsageSection({
   mainAgentToolCount: number
   onAgentClick: (agentId: string) => void
   onPromptClick: (text: string, timestamp: number) => void
+  /** Set of prompt texts that have a matching UserPromptSubmit event.
+   *  Prompts NOT in the set (pre-plugin prompts on resumed sessions)
+   *  render as muted + non-clickable since scrollToPrompt would have
+   *  nowhere to land. */
+  eventPromptTexts: Set<string>
 }) {
   // Server-side feature flag. The transcript-stats endpoint costs a
   // jsonl walk; skipping the round-trip entirely when disabled keeps
@@ -441,16 +447,32 @@ export function TokenUsageSection({
           key: 'prompt',
           label: 'Prompt',
           sortType: 'string',
-          render: (r) => (
-            <button
-              type="button"
-              onClick={() => onPromptClick(r.text, r.timestamp)}
-              className="block truncate max-w-[400px] text-left cursor-pointer hover:underline"
-              title={r.text}
-            >
-              {r.text}
-            </button>
-          ),
+          render: (r) => {
+            // Only prompts with a matching UserPromptSubmit event can
+            // scroll. Pre-plugin prompts on resumed sessions render
+            // muted + non-clickable.
+            const hasEvent = eventPromptTexts.has(r.text)
+            if (!hasEvent) {
+              return (
+                <span
+                  className="block truncate max-w-[400px] text-muted-foreground/50"
+                  title={`${r.text}\n\n(no matching event — pre-plugin prompt)`}
+                >
+                  {r.text}
+                </span>
+              )
+            }
+            return (
+              <button
+                type="button"
+                onClick={() => onPromptClick(r.text, r.timestamp)}
+                className="block truncate max-w-[400px] text-left cursor-pointer hover:underline"
+                title={r.text}
+              >
+                {r.text}
+              </button>
+            )
+          },
           sortValue: (r) => r.text,
         },
         {

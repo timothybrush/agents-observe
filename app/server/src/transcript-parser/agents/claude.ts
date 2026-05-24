@@ -26,6 +26,15 @@ interface IndexedLine {
   type: string
   promptId: string | null
   timestamp: number
+  /** True only for user lines that look like a real user-typed prompt
+   *  (have text content, aren't <command-…> / <local-command-…> /
+   *  `[Request interrupted]` injects). The call→prompt parentUuid walk
+   *  stops at these — skipping past tool_result user lines that also
+   *  carry the same promptId. Using the prompt line's uuid (not its
+   *  promptId) as the canonical key sidesteps the resume-replay bug
+   *  where a single prompt gets re-emitted with a fresh promptId on
+   *  every resume. */
+  isPromptLine: boolean
 }
 
 function parseTimestamp(value: unknown): number {
@@ -121,6 +130,7 @@ async function parseJsonlFile(filePath: string): Promise<JsonlParseResult> {
       type: typeof line.type === 'string' ? line.type : '',
       promptId: typeof line.promptId === 'string' ? line.promptId : null,
       timestamp: ts,
+      isPromptLine: false, // set below when we identify the user-prompt line
     }
     if (uuid) lineIndex.set(uuid, indexed)
 
@@ -172,8 +182,10 @@ async function parseJsonlFile(filePath: string): Promise<JsonlParseResult> {
       }
     } else if (line.type === 'user' && line.message) {
       const content = line.message.content
-      // Prompt text: only on user lines that originate a prompt
-      // (carry a promptId). Tool results don't have one.
+      // Tool_result user lines also carry promptId (the same one as the
+      // originating user prompt), so promptId alone isn't enough to
+      // distinguish a user-typed message from a tool result. Real user
+      // prompts have string text or [text]-array content.
       if (typeof line.promptId === 'string' && line.promptId) {
         let text: string | null = null
         if (typeof content === 'string') {
@@ -185,12 +197,11 @@ async function parseJsonlFile(filePath: string): Promise<JsonlParseResult> {
         ) {
           text = content[0].text
         }
-        if (text !== null && !(line.promptId in prompts)) {
-          prompts[line.promptId] = { text, timestamp: ts }
-        }
-        // Track real user-typed prompts (deduped by uuid so resume
-        // replays of the same line don't inflate the count). Filter out
-        // internal injects and [Request interrupted by user] auto-msgs.
+        // Real user-typed prompt: register it under its uuid (canonical
+        // across resume-replays — same uuid + same text gets a fresh
+        // promptId on each resume, but the uuid is stable). Also mark
+        // this line in lineIndex so the call→prompt walk can stop here
+        // instead of at intermediate tool_result user lines.
         if (
           text !== null &&
           uuid &&
@@ -198,6 +209,13 @@ async function parseJsonlFile(filePath: string): Promise<JsonlParseResult> {
           !text.startsWith(INTERRUPT_PREFIX)
         ) {
           userPromptUuids.add(uuid)
+          if (!(uuid in prompts)) {
+            prompts[uuid] = { text, timestamp: ts }
+          }
+          // lineIndex was set with isPromptLine:false above — flip it.
+          // (lineIndex.set already ran so the existing entry is mutable.)
+          const entry = lineIndex.get(uuid)
+          if (entry) entry.isPromptLine = true
         }
       }
       // Tool results: capture the timestamp keyed by tool_use_id so
@@ -218,8 +236,12 @@ async function parseJsonlFile(filePath: string): Promise<JsonlParseResult> {
     }
   }
 
-  // Resolve promptId for each call by walking parentUuid back through
-  // the line index until we hit any line carrying a non-null promptId.
+  // Resolve each call's canonical prompt by walking parentUuid back
+  // through lineIndex until we hit a real user-prompt line (skipping
+  // past intermediate tool_result user lines that share the same
+  // promptId). The canonical key is the prompt line's uuid — stable
+  // across session resumes, unlike promptId which gets re-minted on
+  // every resume.
   const maxWalkSteps = lineIndex.size + 1
   for (const [messageId, call] of callMap) {
     const startUuid = firstUuidByMessageId.get(messageId)
@@ -229,8 +251,8 @@ async function parseJsonlFile(filePath: string): Promise<JsonlParseResult> {
     while (cursor && steps < maxWalkSteps) {
       const node = lineIndex.get(cursor)
       if (!node) break
-      if (node.promptId) {
-        call.promptId = node.promptId
+      if (node.isPromptLine && node.uuid) {
+        call.promptId = node.uuid
         break
       }
       cursor = node.parentUuid
@@ -239,7 +261,7 @@ async function parseJsonlFile(filePath: string): Promise<JsonlParseResult> {
   }
 
   // Per-prompt last-activity timestamp. Walk every indexed line back
-  // through its parent chain to find the originating prompt, then
+  // through its parent chain to find the originating prompt line, then
   // record max(timestamp) per prompt. This captures *all* events for
   // each prompt — assistant messages, attachments, and the tool_result
   // user lines that mark when subagents and tools return — independent
@@ -253,9 +275,9 @@ async function parseJsonlFile(filePath: string): Promise<JsonlParseResult> {
     while (cursor && steps < maxWalkSteps) {
       const node = lineIndex.get(cursor)
       if (!node) break
-      if (node.promptId) {
-        const cur = lastTimestampByPromptId[node.promptId] ?? 0
-        if (line.timestamp > cur) lastTimestampByPromptId[node.promptId] = line.timestamp
+      if (node.isPromptLine && node.uuid) {
+        const cur = lastTimestampByPromptId[node.uuid] ?? 0
+        if (line.timestamp > cur) lastTimestampByPromptId[node.uuid] = line.timestamp
         break
       }
       cursor = node.parentUuid
