@@ -5,8 +5,18 @@ import type {
   TranscriptUsage,
   TranscriptSubagent,
   TranscriptParseError,
+  TranscriptToolStat,
   AgentParseResult,
 } from '../types'
+
+interface ToolUseRecord {
+  name: string
+  timestamp: number
+  /** Captured for Read/Edit/Write (file_path) — used for filesRead/filesEdited sets. */
+  filePath: string | null
+  /** Captured for Bash — used for gitCommits regex. */
+  command: string | null
+}
 
 // ── Parsing primitives ────────────────────────────────────────────
 
@@ -16,6 +26,15 @@ interface IndexedLine {
   type: string
   promptId: string | null
   timestamp: number
+  /** True only for user lines that look like a real user-typed prompt
+   *  (have text content, aren't <command-…> / <local-command-…> /
+   *  `[Request interrupted]` injects). The call→prompt parentUuid walk
+   *  stops at these — skipping past tool_result user lines that also
+   *  carry the same promptId. Using the prompt line's uuid (not its
+   *  promptId) as the canonical key sidesteps the resume-replay bug
+   *  where a single prompt gets re-emitted with a fresh promptId on
+   *  every resume. */
+  isPromptLine: boolean
 }
 
 function parseTimestamp(value: unknown): number {
@@ -47,7 +66,28 @@ interface JsonlParseResult {
    *  proper "time spent on this prompt" without bleeding in idle time
    *  between prompts. */
   lastTimestampByPromptId: Record<string, number>
+  /** All tool_use blocks keyed by tool_use_id. Used by parseClaudeSession
+   *  to aggregate filesRead/filesEdited/gitCommits/toolStats across the
+   *  main JSONL + every subagent JSONL. */
+  toolUses: Map<string, ToolUseRecord>
+  /** Timestamps of tool_result blocks keyed by tool_use_id, used for
+   *  per-tool duration stats. */
+  toolResults: Map<string, number>
+  /** Set of uuids whose user line looks like a real user-typed prompt
+   *  (has text content, isn't an internal inject like <command-name>,
+   *  <local-command-stdout>, or `[Request interrupted by user]`).
+   *  Dedup by uuid because session resume rewrites the JSONL, re-emitting
+   *  the same prompt line multiple times with the same uuid but new
+   *  promptIds — promptId-based counting would over-count those replays.
+   */
+  userPromptUuids: Set<string>
 }
+
+/** Matches the leading tag of Claude Code's internal user-line injects
+ *  (slash commands, command caveats, captured bash output). These have
+ *  a promptId but don't represent a user prompt. */
+const INJECT_PREFIX_RE = /^<(?:command-|local-command-|bash-stdout|bash-stderr|bash-input)/
+const INTERRUPT_PREFIX = '[Request interrupted'
 
 /**
  * Stream-parse a single jsonl file. Returns deduped calls (by
@@ -59,6 +99,9 @@ async function parseJsonlFile(filePath: string): Promise<JsonlParseResult> {
   const lineIndex = new Map<string, IndexedLine>()
   const prompts: Record<string, { text: string; timestamp: number }> = {}
   const firstUuidByMessageId = new Map<string, string>()
+  const toolUses = new Map<string, ToolUseRecord>()
+  const toolResults = new Map<string, number>()
+  const userPromptUuids = new Set<string>()
 
   let firstTimestamp = Infinity
   let lastTimestamp = 0
@@ -87,6 +130,7 @@ async function parseJsonlFile(filePath: string): Promise<JsonlParseResult> {
       type: typeof line.type === 'string' ? line.type : '',
       promptId: typeof line.promptId === 'string' ? line.promptId : null,
       timestamp: ts,
+      isPromptLine: false, // set below when we identify the user-prompt line
     }
     if (uuid) lineIndex.set(uuid, indexed)
 
@@ -103,6 +147,17 @@ async function parseJsonlFile(filePath: string): Promise<JsonlParseResult> {
           if (block && block.type === 'tool_use' && typeof block.id === 'string') {
             toolUseIds.push(block.id)
             toolCount += 1
+            // First write wins — a given tool_use_id can appear in more
+            // than one assistant line for the same message (thinking +
+            // tool_use blocks emit separately). The first carries the
+            // canonical timestamp/name/input.
+            if (!toolUses.has(block.id)) {
+              const name = typeof block.name === 'string' ? block.name : ''
+              const input = block.input ?? null
+              const filePath = input && typeof input.file_path === 'string' ? input.file_path : null
+              const command = input && typeof input.command === 'string' ? input.command : null
+              toolUses.set(block.id, { name, timestamp: ts, filePath, command })
+            }
           }
         }
       }
@@ -125,26 +180,68 @@ async function parseJsonlFile(filePath: string): Promise<JsonlParseResult> {
           promptId: null,
         })
       }
-    } else if (line.type === 'user' && line.promptId && line.message) {
+    } else if (line.type === 'user' && line.message) {
       const content = line.message.content
-      let text: string | null = null
-      if (typeof content === 'string') {
-        text = content
-      } else if (
-        Array.isArray(content) &&
-        content[0]?.type === 'text' &&
-        typeof content[0].text === 'string'
-      ) {
-        text = content[0].text
+      // Tool_result user lines also carry promptId (the same one as the
+      // originating user prompt), so promptId alone isn't enough to
+      // distinguish a user-typed message from a tool result. Real user
+      // prompts have string text or [text]-array content.
+      if (typeof line.promptId === 'string' && line.promptId) {
+        let text: string | null = null
+        if (typeof content === 'string') {
+          text = content
+        } else if (
+          Array.isArray(content) &&
+          content[0]?.type === 'text' &&
+          typeof content[0].text === 'string'
+        ) {
+          text = content[0].text
+        }
+        // Real user-typed prompt: register it under its uuid (canonical
+        // across resume-replays — same uuid + same text gets a fresh
+        // promptId on each resume, but the uuid is stable). Also mark
+        // this line in lineIndex so the call→prompt walk can stop here
+        // instead of at intermediate tool_result user lines.
+        if (
+          text !== null &&
+          uuid &&
+          !INJECT_PREFIX_RE.test(text) &&
+          !text.startsWith(INTERRUPT_PREFIX)
+        ) {
+          userPromptUuids.add(uuid)
+          if (!(uuid in prompts)) {
+            prompts[uuid] = { text, timestamp: ts }
+          }
+          // lineIndex was set with isPromptLine:false above — flip it.
+          // (lineIndex.set already ran so the existing entry is mutable.)
+          const entry = lineIndex.get(uuid)
+          if (entry) entry.isPromptLine = true
+        }
       }
-      if (text !== null && !(line.promptId in prompts)) {
-        prompts[line.promptId] = { text, timestamp: ts }
+      // Tool results: capture the timestamp keyed by tool_use_id so
+      // parseClaudeSession can pair each tool_use with its result and
+      // compute per-tool durations.
+      if (Array.isArray(content)) {
+        for (const block of content) {
+          if (
+            block &&
+            block.type === 'tool_result' &&
+            typeof block.tool_use_id === 'string' &&
+            !toolResults.has(block.tool_use_id)
+          ) {
+            toolResults.set(block.tool_use_id, ts)
+          }
+        }
       }
     }
   }
 
-  // Resolve promptId for each call by walking parentUuid back through
-  // the line index until we hit any line carrying a non-null promptId.
+  // Resolve each call's canonical prompt by walking parentUuid back
+  // through lineIndex until we hit a real user-prompt line (skipping
+  // past intermediate tool_result user lines that share the same
+  // promptId). The canonical key is the prompt line's uuid — stable
+  // across session resumes, unlike promptId which gets re-minted on
+  // every resume.
   const maxWalkSteps = lineIndex.size + 1
   for (const [messageId, call] of callMap) {
     const startUuid = firstUuidByMessageId.get(messageId)
@@ -154,8 +251,8 @@ async function parseJsonlFile(filePath: string): Promise<JsonlParseResult> {
     while (cursor && steps < maxWalkSteps) {
       const node = lineIndex.get(cursor)
       if (!node) break
-      if (node.promptId) {
-        call.promptId = node.promptId
+      if (node.isPromptLine && node.uuid) {
+        call.promptId = node.uuid
         break
       }
       cursor = node.parentUuid
@@ -164,7 +261,7 @@ async function parseJsonlFile(filePath: string): Promise<JsonlParseResult> {
   }
 
   // Per-prompt last-activity timestamp. Walk every indexed line back
-  // through its parent chain to find the originating prompt, then
+  // through its parent chain to find the originating prompt line, then
   // record max(timestamp) per prompt. This captures *all* events for
   // each prompt — assistant messages, attachments, and the tool_result
   // user lines that mark when subagents and tools return — independent
@@ -178,9 +275,9 @@ async function parseJsonlFile(filePath: string): Promise<JsonlParseResult> {
     while (cursor && steps < maxWalkSteps) {
       const node = lineIndex.get(cursor)
       if (!node) break
-      if (node.promptId) {
-        const cur = lastTimestampByPromptId[node.promptId] ?? 0
-        if (line.timestamp > cur) lastTimestampByPromptId[node.promptId] = line.timestamp
+      if (node.isPromptLine && node.uuid) {
+        const cur = lastTimestampByPromptId[node.uuid] ?? 0
+        if (line.timestamp > cur) lastTimestampByPromptId[node.uuid] = line.timestamp
         break
       }
       cursor = node.parentUuid
@@ -195,6 +292,9 @@ async function parseJsonlFile(filePath: string): Promise<JsonlParseResult> {
     lastTimestamp,
     toolCount,
     lastTimestampByPromptId,
+    toolUses,
+    toolResults,
+    userPromptUuids,
   }
 }
 
@@ -202,24 +302,43 @@ async function parseJsonlFile(filePath: string): Promise<JsonlParseResult> {
 
 /**
  * Parse the main Claude Code session jsonl plus every subagent jsonl
- * for the given agent ids. Subagent jsonls live at
- * `<dirname(mainJsonl)>/<basename(mainJsonl) without .jsonl>/subagents/agent-<agentId>.jsonl`,
- * and each has a sibling `.meta.json` with `{agentType, description, toolUseId}`.
+ * discovered in `<dirname(mainJsonl)>/<basename(mainJsonl) without .jsonl>/subagents/`.
+ * Each subagent has `agent-<agentId>.jsonl` + a sibling `agent-<agentId>.meta.json`
+ * with `{agentType, description, toolUseId}`.
  *
- * Subagent-level failures (missing file, EACCES, parse errors) populate
- * `errors[]` and are skipped — they don't fail the whole parse.
+ * Discovery is filesystem-driven (not DB-driven) so resumed sessions
+ * that ran subagents before the plugin was capturing still get counted.
+ *
+ * Subagent-level failures (EACCES, parse errors) populate `errors[]` and
+ * are skipped — they don't fail the whole parse. ENOENT on the subagents
+ * dir is silent (a session with no subagents simply has no directory).
  */
-export async function parseClaudeSession(
-  mainJsonlPath: string,
-  subagentAgentIds: string[],
-): Promise<AgentParseResult> {
+export async function parseClaudeSession(mainJsonlPath: string): Promise<AgentParseResult> {
   const main = await parseJsonlFile(mainJsonlPath)
 
   const subagentsDir = mainJsonlPath.replace(/\.jsonl$/, '') + '/subagents'
   const errors: TranscriptParseError[] = []
   const subagents: TranscriptSubagent[] = []
+  const subagentParses: JsonlParseResult[] = []
 
-  for (const agentId of subagentAgentIds) {
+  let dirEntries: string[] = []
+  try {
+    dirEntries = await fsp.readdir(subagentsDir)
+  } catch (err: any) {
+    if (err?.code !== 'ENOENT') {
+      errors.push({
+        scope: 'main',
+        code: 'unreadable',
+        message: `Subagents directory unreadable: ${err?.message ?? String(err)}`,
+      })
+    }
+  }
+
+  const agentIds = dirEntries
+    .filter((f) => f.startsWith('agent-') && f.endsWith('.jsonl'))
+    .map((f) => f.slice('agent-'.length, -'.jsonl'.length))
+
+  for (const agentId of agentIds) {
     const jsonlPath = `${subagentsDir}/agent-${agentId}.jsonl`
     const metaPath = `${subagentsDir}/agent-${agentId}.meta.json`
 
@@ -247,14 +366,7 @@ export async function parseClaudeSession(
     try {
       parsed = await parseJsonlFile(jsonlPath)
     } catch (err: any) {
-      if (err?.code === 'ENOENT') {
-        errors.push({
-          scope: 'subagent',
-          agentId,
-          code: 'missing',
-          message: `Subagent transcript not found: ${jsonlPath}`,
-        })
-      } else if (err?.code === 'EACCES') {
+      if (err?.code === 'EACCES') {
         errors.push({
           scope: 'subagent',
           agentId,
@@ -272,13 +384,15 @@ export async function parseClaudeSession(
     }
 
     // Skip agents that produced no LLM activity (no calls === no
-    // tokens, no duration, no tools). These are typically cruft in the
-    // DB — agent rows we recorded but never actually used. The load
-    // failure (if any) stays in `errors[]` for diagnostics.
+    // tokens, no duration, no tools). The load failure (if any) stays
+    // in `errors[]` for diagnostics.
     const row = buildSubagentRow(agentId, meta, parsed)
     if (row.requests === 0) continue
     subagents.push(row)
+    if (parsed) subagentParses.push(parsed)
   }
+
+  const toolAggregate = aggregateToolStats([main, ...subagentParses])
 
   return {
     calls: main.calls,
@@ -286,6 +400,127 @@ export async function parseClaudeSession(
     lastTimestampByPromptId: main.lastTimestampByPromptId,
     subagents,
     errors,
+    startedAt: main.firstTimestamp > 0 ? main.firstTimestamp : null,
+    durationMs:
+      main.firstTimestamp > 0 && main.lastTimestamp > main.firstTimestamp
+        ? main.lastTimestamp - main.firstTimestamp
+        : null,
+    toolCalls: toolAggregate.toolCalls,
+    filesRead: toolAggregate.filesRead,
+    filesEdited: toolAggregate.filesEdited,
+    gitCommits: toolAggregate.gitCommits,
+    toolStats: toolAggregate.toolStats,
+    // Real user prompts come from the main JSONL only — subagent
+    // JSONLs synthesize "user" lines for the parent's Agent tool
+    // invocation, not user keystrokes.
+    userPrompts: main.userPromptUuids.size,
+  }
+}
+
+const GIT_COMMIT_REGEX = /\bgit\s+commit\b/
+
+interface ToolAggregateResult {
+  toolCalls: number
+  filesRead: number
+  filesEdited: number
+  gitCommits: number
+  toolStats: TranscriptToolStat[]
+}
+
+/**
+ * Combine the main + per-subagent JsonlParseResult lists into a single
+ * tool-stats view. tool_use_ids are unique within a session, so the
+ * merge across files is straightforward: each id appears in exactly
+ * one toolUses map. Pairing with toolResults works the same way for
+ * regular tools; for the Agent tool the tool_use is in main and the
+ * tool_result is also in main (the subagent's own jsonl carries its
+ * internal tool activity but not the parent pairing), which the
+ * cross-file merge handles naturally.
+ */
+function aggregateToolStats(parses: JsonlParseResult[]): ToolAggregateResult {
+  const filesRead = new Set<string>()
+  const filesEdited = new Set<string>()
+  let gitCommits = 0
+
+  // Group durations + names per tool, tracking the longest invocation.
+  interface ToolAcc {
+    count: number
+    durations: number[]
+    longestMs: number
+    longestId: string | null
+  }
+  const perTool = new Map<string, ToolAcc>()
+  let toolCalls = 0
+
+  // First pass: walk every tool_use; populate file sets, gitCommits,
+  // and per-tool counts. We don't compute durations yet — that's a
+  // separate pass below so the result merge order doesn't matter.
+  for (const p of parses) {
+    for (const [, use] of p.toolUses) {
+      toolCalls += 1
+      if (use.name === 'Read' && use.filePath) filesRead.add(use.filePath)
+      else if ((use.name === 'Edit' || use.name === 'Write') && use.filePath) {
+        filesEdited.add(use.filePath)
+      } else if (use.name === 'Bash' && use.command && GIT_COMMIT_REGEX.test(use.command)) {
+        gitCommits += 1
+      }
+      const acc = perTool.get(use.name) ?? {
+        count: 0,
+        durations: [],
+        longestMs: 0,
+        longestId: null,
+      }
+      acc.count += 1
+      perTool.set(use.name, acc)
+    }
+  }
+
+  // Second pass: pair each tool_use with its tool_result (looked up
+  // across every parse since toolUseIds are session-unique). Track
+  // per-tool durations + longest.
+  const allResults = new Map<string, number>()
+  for (const p of parses) for (const [id, ts] of p.toolResults) allResults.set(id, ts)
+  for (const p of parses) {
+    for (const [id, use] of p.toolUses) {
+      const endTs = allResults.get(id)
+      if (!endTs || endTs <= use.timestamp) continue
+      const dur = endTs - use.timestamp
+      const acc = perTool.get(use.name)!
+      acc.durations.push(dur)
+      if (dur > acc.longestMs) {
+        acc.longestMs = dur
+        acc.longestId = id
+      }
+    }
+  }
+
+  const toolStats: TranscriptToolStat[] = [...perTool.entries()]
+    .sort((a, b) => b[1].count - a[1].count)
+    .map(([name, acc]) => {
+      const durs = acc.durations.slice().sort((a, b) => a - b)
+      const mid = Math.floor(durs.length / 2)
+      const median =
+        durs.length === 0
+          ? null
+          : durs.length % 2 === 0
+            ? Math.round((durs[mid - 1] + durs[mid]) / 2)
+            : durs[mid]
+      return {
+        name,
+        count: acc.count,
+        minMs: durs.length > 0 ? durs[0] : null,
+        medianMs: median,
+        maxMs: durs.length > 0 ? durs[durs.length - 1] : null,
+        longestToolUseId: acc.longestId,
+      }
+    })
+
+  return {
+    toolCalls,
+    filesRead: filesRead.size,
+    filesEdited: filesEdited.size,
+    gitCommits,
+    toolStats,
   }
 }
 

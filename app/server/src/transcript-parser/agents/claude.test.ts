@@ -96,11 +96,14 @@ afterAll(() => {
 
 describe('parseClaudeSession — main only', () => {
   test('returns deduped calls + prompts + empty subagents', async () => {
-    const result = await parseClaudeSession(FIXTURE_PATH, [])
+    const result = await parseClaudeSession(FIXTURE_PATH)
     expect(result.calls).toHaveLength(1)
     expect(result.calls[0].messageId).toBe('msg1')
     expect(result.calls[0].toolUseIds).toEqual(['toolu_1', 'toolu_2'])
-    expect(result.calls[0].promptId).toBe('p1')
+    // promptId is now the canonical uuid of the user-prompt line
+    // (was the JSONL's promptId field). See claude.ts: switching to
+    // uuid sidesteps the resume-replay bug where promptId is re-minted.
+    expect(result.calls[0].promptId).toBe('u1')
     expect(result.calls[0].requestId).toBe('req_aaaa')
     expect(result.calls[0].serviceTier).toBe('standard')
     expect(result.calls[0].stopReason).toBe('tool_use')
@@ -111,26 +114,27 @@ describe('parseClaudeSession — main only', () => {
       cacheCreate5mTokens: 0,
       cacheCreate1hTokens: 20,
     })
-    expect(result.prompts.p1.text).toBe('hello world')
+    // prompts index is now keyed by the user-prompt line's uuid.
+    expect(result.prompts.u1.text).toBe('hello world')
     expect(result.subagents).toHaveLength(0)
     expect(result.errors).toHaveLength(0)
   })
 
   test('lastTimestampByPromptId records the latest line attributable to each prompt', async () => {
-    const result = await parseClaudeSession(FIXTURE_PATH, [])
+    const result = await parseClaudeSession(FIXTURE_PATH)
     // The fixture's last line for p1 is the tool_result user message at
     // 2026-05-22T00:00:02.000Z. parseClaudeSession should attribute that
     // (via parentUuid chain) back to p1.
     const expectedLastTs = Date.parse('2026-05-22T00:00:02.000Z')
-    expect(result.lastTimestampByPromptId.p1).toBe(expectedLastTs)
+    expect(result.lastTimestampByPromptId.u1).toBe(expectedLastTs)
   })
 
   test('lastTimestampByPromptId walks multi-hop parentUuid chains', async () => {
     // Fixture path: user(p1) → attachment → assistant(as1a) → assistant(as1b) → user(tool_result).
     // The deepest descendant must still attribute back to p1. The latest
     // descendant's timestamp must dominate over earlier ones.
-    const result = await parseClaudeSession(FIXTURE_PATH, [])
-    expect(result.lastTimestampByPromptId.p1).toBeGreaterThan(
+    const result = await parseClaudeSession(FIXTURE_PATH)
+    expect(result.lastTimestampByPromptId.u1).toBeGreaterThan(
       Date.parse('2026-05-22T00:00:01.500Z'), // beats the last assistant ts
     )
   })
@@ -192,19 +196,19 @@ describe('parseClaudeSession — main only', () => {
     const path = join(TMP_DIR, 'multi.jsonl')
     writeFileSync(path, lines.map((l) => JSON.stringify(l)).join('\n') + '\n')
 
-    const result = await parseClaudeSession(path, [])
+    const result = await parseClaudeSession(path)
 
     // p1's last activity must be its OWN assistant call (T+10s), not
     // anything from p2's window — even though p2's lines exist later
     // in the same file.
-    expect(result.lastTimestampByPromptId.p1).toBe(Date.parse('2026-06-01T00:00:10.000Z'))
+    expect(result.lastTimestampByPromptId.u1).toBe(Date.parse('2026-06-01T00:00:10.000Z'))
     // p2's last activity is its own assistant call at T+613s, not the
-    // session's tail.
-    expect(result.lastTimestampByPromptId.p2).toBe(Date.parse('2026-06-01T00:10:13.000Z'))
+    // session's tail. Keyed by uuid `u2` (the second user prompt line).
+    expect(result.lastTimestampByPromptId.u2).toBe(Date.parse('2026-06-01T00:10:13.000Z'))
 
     // Sanity: the idle gap between prompts (600s) is NOT included in
     // p1's activity span.
-    const p1Span = result.lastTimestampByPromptId.p1 - Date.parse('2026-06-01T00:00:00.000Z')
+    const p1Span = result.lastTimestampByPromptId.u1 - Date.parse('2026-06-01T00:00:00.000Z')
     expect(p1Span).toBe(10_000)
   })
 
@@ -258,10 +262,292 @@ describe('parseClaudeSession — main only', () => {
     const path = join(TMP_DIR, 'synthetic.jsonl')
     writeFileSync(path, lines.map((l) => JSON.stringify(l)).join('\n') + '\n')
 
-    const result = await parseClaudeSession(path, [])
+    const result = await parseClaudeSession(path)
     expect(result.calls).toHaveLength(1)
     expect(result.calls[0].messageId).toBe('real-msg')
     expect(result.calls.find((c) => c.model === '<synthetic>')).toBeUndefined()
+  })
+})
+
+describe('parseClaudeSession — tool stats', () => {
+  // Build a fixture with three different tools plus a pair of tool_result
+  // lines, so we exercise file aggregation, gitCommits matching, and the
+  // tool_use ↔ tool_result duration pairing in one pass.
+  const TOOL_FIXTURE_LINES = [
+    {
+      type: 'user',
+      uuid: 'u1',
+      parentUuid: null,
+      promptId: 'p1',
+      timestamp: '2026-07-01T00:00:00.000Z',
+      message: { content: 'do stuff' },
+    },
+    // Assistant emits 4 tool_use blocks across two messages.
+    {
+      type: 'assistant',
+      uuid: 'a1',
+      parentUuid: 'u1',
+      timestamp: '2026-07-01T00:00:01.000Z',
+      isSidechain: false,
+      message: {
+        id: 'm1',
+        model: 'claude-opus-4-7',
+        usage: { input_tokens: 1, output_tokens: 1 },
+        content: [
+          { type: 'tool_use', id: 'tu_read1', name: 'Read', input: { file_path: '/x/a.ts' } },
+          { type: 'tool_use', id: 'tu_read2', name: 'Read', input: { file_path: '/x/a.ts' } }, // same path → dedup
+          { type: 'tool_use', id: 'tu_edit', name: 'Edit', input: { file_path: '/x/b.ts' } },
+        ],
+      },
+    },
+    // tool_result for tu_read1 — 500ms after its tool_use.
+    {
+      type: 'user',
+      uuid: 'r1',
+      parentUuid: 'a1',
+      timestamp: '2026-07-01T00:00:01.500Z',
+      message: {
+        content: [{ type: 'tool_result', tool_use_id: 'tu_read1', content: 'ok' }],
+      },
+    },
+    // tool_result for tu_read2 — 2000ms (the slowest Read).
+    {
+      type: 'user',
+      uuid: 'r2',
+      parentUuid: 'r1',
+      timestamp: '2026-07-01T00:00:03.000Z',
+      message: {
+        content: [{ type: 'tool_result', tool_use_id: 'tu_read2', content: 'ok' }],
+      },
+    },
+    // Bash invocation that should match the git commit regex.
+    {
+      type: 'assistant',
+      uuid: 'a2',
+      parentUuid: 'r2',
+      timestamp: '2026-07-01T00:00:04.000Z',
+      isSidechain: false,
+      message: {
+        id: 'm2',
+        model: 'claude-opus-4-7',
+        usage: { input_tokens: 1, output_tokens: 1 },
+        content: [
+          {
+            type: 'tool_use',
+            id: 'tu_bash',
+            name: 'Bash',
+            input: { command: 'git commit -m hi' },
+          },
+        ],
+      },
+    },
+  ]
+
+  test('aggregates filesRead/filesEdited/gitCommits/toolCalls + per-tool durations + longestToolUseId', async () => {
+    const path = join(TMP_DIR, 'tools.jsonl')
+    writeFileSync(path, TOOL_FIXTURE_LINES.map((l) => JSON.stringify(l)).join('\n') + '\n')
+
+    const result = await parseClaudeSession(path)
+
+    expect(result.toolCalls).toBe(4)
+    expect(result.filesRead).toBe(1) // /x/a.ts appears twice → deduped
+    expect(result.filesEdited).toBe(1) // /x/b.ts
+    expect(result.gitCommits).toBe(1)
+
+    // Per-tool stats: Read should appear with both invocations, Edit + Bash with one each.
+    const byName = new Map(result.toolStats.map((t) => [t.name, t]))
+    expect(byName.get('Read')!.count).toBe(2)
+    expect(byName.get('Read')!.minMs).toBe(500)
+    expect(byName.get('Read')!.maxMs).toBe(2_000)
+    expect(byName.get('Read')!.longestToolUseId).toBe('tu_read2')
+    // Edit has no paired tool_result in the fixture → null durations.
+    expect(byName.get('Edit')!.count).toBe(1)
+    expect(byName.get('Edit')!.minMs).toBeNull()
+    expect(byName.get('Edit')!.longestToolUseId).toBeNull()
+    expect(byName.get('Bash')!.count).toBe(1)
+
+    // startedAt + durationMs from the main JSONL timestamps.
+    expect(result.startedAt).toBe(Date.parse('2026-07-01T00:00:00.000Z'))
+    expect(result.durationMs).toBe(4_000)
+  })
+
+  test('prompts table dedups resume-replays: same uuid + new promptId per replay collapses to one row', async () => {
+    // Reproduces the prompts-table bug: a session resumed twice has the
+    // same user-prompt line emitted three times with the same uuid +
+    // text but three different promptIds. The OLD parser keyed prompts
+    // by promptId → produced 3 separate rows of which 2 had zero calls
+    // and got dropped. The NEW parser keys by uuid → one row, all
+    // assistant calls correctly attribute to it.
+    const lines = [
+      {
+        type: 'user',
+        uuid: 'u-prompt',
+        parentUuid: null,
+        promptId: 'pid-replay1',
+        timestamp: '2026-07-01T00:00:00.000Z',
+        message: { content: 'do the thing' },
+      },
+      {
+        type: 'user',
+        uuid: 'u-prompt',
+        parentUuid: null,
+        promptId: 'pid-replay2',
+        timestamp: '2026-07-01T00:00:00.000Z',
+        message: { content: 'do the thing' },
+      },
+      {
+        type: 'assistant',
+        uuid: 'a1',
+        parentUuid: 'u-prompt',
+        timestamp: '2026-07-01T00:00:01.000Z',
+        isSidechain: false,
+        message: {
+          id: 'm1',
+          model: 'claude-opus-4-7',
+          usage: { input_tokens: 1, output_tokens: 1 },
+          content: [{ type: 'text', text: 'sure' }],
+        },
+      },
+    ]
+    const path = join(TMP_DIR, 'replay.jsonl')
+    writeFileSync(path, lines.map((l) => JSON.stringify(l)).join('\n') + '\n')
+
+    const result = await parseClaudeSession(path)
+    // One canonical entry keyed by uuid, even though two promptIds
+    // appeared in the user lines.
+    expect(Object.keys(result.prompts)).toEqual(['u-prompt'])
+    // The assistant call attributes to the same uuid.
+    expect(result.calls).toHaveLength(1)
+    expect(result.calls[0].promptId).toBe('u-prompt')
+  })
+
+  test('userPrompts dedups resume-replays by uuid and filters internal injects', async () => {
+    // Simulate a session that was resumed twice: the same user-prompt
+    // line appears three times in the JSONL (same uuid, same parent,
+    // same text, same timestamp) but with three different promptIds —
+    // one per replay. The real count is one.
+    //
+    // Plus: a second prompt that's a real user typed message, a
+    // <command-name> slash command, a <local-command-stdout> capture,
+    // and a [Request interrupted by user] auto-message. The first two
+    // count; the last three are filtered.
+    const lines = [
+      // Replay 1 of "hello"
+      {
+        type: 'user',
+        uuid: 'u-prompt1',
+        parentUuid: null,
+        promptId: 'pid-1a',
+        timestamp: '2026-07-01T00:00:00.000Z',
+        message: { content: 'hello' },
+      },
+      // Replay 2 of "hello" — same uuid, different promptId
+      {
+        type: 'user',
+        uuid: 'u-prompt1',
+        parentUuid: null,
+        promptId: 'pid-1b',
+        timestamp: '2026-07-01T00:00:00.000Z',
+        message: { content: 'hello' },
+      },
+      // Replay 3 of "hello" — same uuid, different promptId
+      {
+        type: 'user',
+        uuid: 'u-prompt1',
+        parentUuid: null,
+        promptId: 'pid-1c',
+        timestamp: '2026-07-01T00:00:00.000Z',
+        message: { content: 'hello' },
+      },
+      // A distinct real prompt
+      {
+        type: 'user',
+        uuid: 'u-prompt2',
+        parentUuid: null,
+        promptId: 'pid-2',
+        timestamp: '2026-07-01T00:01:00.000Z',
+        message: { content: 'do the thing' },
+      },
+      // Slash command — filtered
+      {
+        type: 'user',
+        uuid: 'u-slash',
+        parentUuid: null,
+        promptId: 'pid-slash',
+        timestamp: '2026-07-01T00:02:00.000Z',
+        message: { content: '<command-name>/clear</command-name>' },
+      },
+      // Captured bash output — filtered
+      {
+        type: 'user',
+        uuid: 'u-stdout',
+        parentUuid: null,
+        promptId: 'pid-stdout',
+        timestamp: '2026-07-01T00:03:00.000Z',
+        message: { content: '<local-command-stdout>build output...</local-command-stdout>' },
+      },
+      // Interrupt — filtered
+      {
+        type: 'user',
+        uuid: 'u-interrupt',
+        parentUuid: null,
+        promptId: 'pid-interrupt',
+        timestamp: '2026-07-01T00:04:00.000Z',
+        message: { content: '[Request interrupted by user]' },
+      },
+    ]
+    const path = join(TMP_DIR, 'user-prompts.jsonl')
+    writeFileSync(path, lines.map((l) => JSON.stringify(l)).join('\n') + '\n')
+
+    const result = await parseClaudeSession(path)
+    expect(result.userPrompts).toBe(2)
+  })
+
+  test('tool stats merge across main + subagent jsonls', async () => {
+    const path = join(TMP_DIR, 'merge.jsonl')
+    writeFileSync(path, TOOL_FIXTURE_LINES.map((l) => JSON.stringify(l)).join('\n') + '\n')
+
+    // Subagent that runs a Read of its own — should be added to the main
+    // session's Read count and filesRead set.
+    const dir = path.replace(/\.jsonl$/, '') + '/subagents'
+    mkdirSync(dir, { recursive: true })
+    writeFileSync(
+      dir + '/agent-sub1.jsonl',
+      [
+        {
+          type: 'assistant',
+          uuid: 'sub-a1',
+          parentUuid: null,
+          timestamp: '2026-07-01T00:00:05.000Z',
+          isSidechain: true,
+          message: {
+            id: 'sub-m1',
+            model: 'claude-haiku-4-5',
+            usage: { input_tokens: 1, output_tokens: 1 },
+            content: [
+              {
+                type: 'tool_use',
+                id: 'tu_sub_read',
+                name: 'Read',
+                input: { file_path: '/sub/y.ts' },
+              },
+            ],
+          },
+        },
+      ]
+        .map((l) => JSON.stringify(l))
+        .join('\n') + '\n',
+    )
+    writeFileSync(
+      dir + '/agent-sub1.meta.json',
+      JSON.stringify({ agentType: 'X', description: '', toolUseId: 'tu_x' }),
+    )
+
+    const result = await parseClaudeSession(path)
+    expect(result.toolCalls).toBe(5) // 4 main + 1 sub
+    expect(result.filesRead).toBe(2) // /x/a.ts + /sub/y.ts
+    const read = result.toolStats.find((t) => t.name === 'Read')!
+    expect(read.count).toBe(3) // 2 main Reads + 1 sub Read
   })
 })
 
@@ -333,7 +619,7 @@ describe('parseClaudeSession — subagents', () => {
         },
       ],
     )
-    const result = await parseClaudeSession(FIXTURE_PATH, ['abbbe04b48fa19be8'])
+    const result = await parseClaudeSession(FIXTURE_PATH)
     expect(result.subagents).toHaveLength(1)
     const sub = result.subagents[0]
     expect(sub.agentId).toBe('abbbe04b48fa19be8')
@@ -348,19 +634,63 @@ describe('parseClaudeSession — subagents', () => {
     expect(sub.durationMs).toBe(10_000)
   })
 
-  test('missing subagent jsonl pushes to errors[] and is filtered out of subagents[]', async () => {
-    const result = await parseClaudeSession(FIXTURE_PATH, ['nonexistent-id'])
-    // The load failure is surfaced for diagnostics…
-    expect(result.errors).toContainEqual(
-      expect.objectContaining({
-        scope: 'subagent',
-        agentId: 'nonexistent-id',
-        code: 'missing',
-      }),
+  test('session with no subagents directory parses cleanly (no errors, empty subagents)', async () => {
+    // Fresh fixture with no subagents/ dir alongside it.
+    const path = join(TMP_DIR, 'no-subs.jsonl')
+    writeFileSync(path, JSON.stringify(FIXTURE_LINES[0]) + '\n')
+    const result = await parseClaudeSession(path)
+    expect(result.subagents).toHaveLength(0)
+    expect(result.errors).toHaveLength(0)
+  })
+
+  test('stray .meta.json without a matching .jsonl is ignored (no error)', async () => {
+    // Filesystem discovery filters by `agent-*.jsonl`, so an orphan
+    // meta file shouldn't trip an error or show up in subagents[].
+    const path = join(TMP_DIR, 'stray-meta.jsonl')
+    writeFileSync(path, JSON.stringify(FIXTURE_LINES[0]) + '\n')
+    const dir = path.replace(/\.jsonl$/, '') + '/subagents'
+    mkdirSync(dir, { recursive: true })
+    writeFileSync(
+      dir + '/agent-ghost.meta.json',
+      JSON.stringify({ agentType: 'X', description: 'd', toolUseId: 't' }),
     )
-    // …but the agent itself is skipped from the table since it has
-    // zero LLM activity — these are typically cruft entries in the DB.
-    expect(result.subagents.find((s) => s.agentId === 'nonexistent-id')).toBeUndefined()
+    const result = await parseClaudeSession(path)
+    expect(result.subagents).toHaveLength(0)
+    expect(result.errors).toHaveLength(0)
+  })
+
+  test('discovers subagents via filesystem scan, not via input list', async () => {
+    // Write a subagent whose id is NOT recorded anywhere in the DB or
+    // input. The dir-scan path must still find it. Regression guard
+    // for resumed sessions where the plugin wasn't capturing when the
+    // subagent ran.
+    const path = join(TMP_DIR, 'dirscan.jsonl')
+    writeFileSync(path, JSON.stringify(FIXTURE_LINES[0]) + '\n')
+    writeSubagent(
+      path,
+      'pre-resume-subagent',
+      { agentType: 'general-purpose', description: 'pre-resume', toolUseId: 'toolu_pre' },
+      [
+        {
+          model: 'claude-haiku-4-5-20251001',
+          ts: '2026-05-22T00:00:10.000Z',
+          usage: {
+            input_tokens: 2,
+            output_tokens: 5,
+            cache_read_input_tokens: 0,
+            cache_creation_input_tokens: 0,
+            cache_creation: { ephemeral_5m_input_tokens: 0, ephemeral_1h_input_tokens: 0 },
+            service_tier: 'standard',
+          },
+          content: [{ type: 'text', text: 'ok' }],
+        },
+      ],
+    )
+    const result = await parseClaudeSession(path)
+    const sub = result.subagents.find((s) => s.agentId === 'pre-resume-subagent')
+    expect(sub).toBeDefined()
+    expect(sub!.agentType).toBe('general-purpose')
+    expect(sub!.toolUseId).toBe('toolu_pre')
   })
 
   test('subagent without .meta.json still parses with null meta fields', async () => {
@@ -379,7 +709,7 @@ describe('parseClaudeSession — subagents', () => {
         content: [{ type: 'text', text: 'ok' }],
       },
     ])
-    const result = await parseClaudeSession(FIXTURE_PATH, ['orphan'])
+    const result = await parseClaudeSession(FIXTURE_PATH)
     const sub = result.subagents.find((s) => s.agentId === 'orphan')
     expect(sub).toBeDefined()
     expect(sub!.agentType).toBeNull()

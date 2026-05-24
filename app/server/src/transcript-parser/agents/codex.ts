@@ -66,12 +66,9 @@ function usageFromCodex(last: any): TranscriptUsage {
 /**
  * Parse a codex rollout jsonl into the common AgentParseResult shape.
  * Codex sessions never have subagents, so the `subagents` array is
- * always empty. Subagent ids in the input are ignored.
+ * always empty.
  */
-export async function parseCodexSession(
-  mainJsonlPath: string,
-  _subagentAgentIds: string[],
-): Promise<AgentParseResult> {
+export async function parseCodexSession(mainJsonlPath: string): Promise<AgentParseResult> {
   const calls: TranscriptCall[] = []
   const prompts: Record<string, { text: string; timestamp: number }> = {}
   const lastTimestampByPromptId: Record<string, number> = {}
@@ -85,6 +82,9 @@ export async function parseCodexSession(
   // means a new API call landed since we last checked.
   let lastSeenTotalTokens: number | null = null
 
+  let firstTimestamp = Infinity
+  let lastTimestamp = 0
+
   const stream = createReadStream(mainJsonlPath, { encoding: 'utf8' })
   const rl = createInterface({ input: stream, crlfDelay: Infinity })
 
@@ -97,6 +97,10 @@ export async function parseCodexSession(
       continue
     }
     const ts = parseTimestamp(line.timestamp)
+    if (ts > 0) {
+      if (ts < firstTimestamp) firstTimestamp = ts
+      if (ts > lastTimestamp) lastTimestamp = ts
+    }
     const payload = line.payload ?? {}
     const lineType = line.type
 
@@ -176,11 +180,25 @@ export async function parseCodexSession(
     })
   }
 
+  const startedAt = firstTimestamp === Infinity ? null : firstTimestamp
   return {
     calls,
     prompts,
     lastTimestampByPromptId,
     subagents: [],
     errors,
+    startedAt,
+    durationMs: startedAt != null && lastTimestamp > startedAt ? lastTimestamp - startedAt : null,
+    // Codex doesn't surface tool_use/tool_result blocks in the same
+    // shape; tool stats stay empty here and the UI falls back to its
+    // events-derived view.
+    toolCalls: 0,
+    filesRead: 0,
+    filesEdited: 0,
+    gitCommits: 0,
+    toolStats: [],
+    // Codex's `prompts` is one entry per turn_id (event_msg user_message)
+    // — no resume-replay duplication or internal injects to filter.
+    userPrompts: Object.keys(prompts).length,
   }
 }

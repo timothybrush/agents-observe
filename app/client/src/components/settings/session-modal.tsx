@@ -1,8 +1,10 @@
-import { useState, useEffect, useRef, useMemo } from 'react'
+import { useState, useEffect, useRef, useMemo, useCallback } from 'react'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
-import { api } from '@/lib/api-client'
+import { api, type TranscriptStatsData } from '@/lib/api-client'
+import { getServerHealth } from '@/lib/server-health'
 import { useUIStore } from '@/stores/ui-store'
 import { Dialog, DialogContent, DialogClose, DialogTitle } from '@/components/ui/dialog'
+import { Tooltip, TooltipTrigger, TooltipContent, TooltipProvider } from '@/components/ui/tooltip'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Spinner } from '@/components/shared/loading-states'
@@ -199,7 +201,7 @@ export function SessionEditModal() {
       >
         <DialogContent
           aria-describedby={undefined}
-          className="w-[1100px] max-w-[95vw] max-h-[85vh] flex flex-col p-0"
+          className="w-[1200px] max-w-[95vw] max-h-[85vh] flex flex-col p-0"
         >
           {/* Header: session name + actions */}
           <div className="flex items-center gap-3 px-5 pt-5 pb-1">
@@ -517,6 +519,9 @@ interface SessionStatsData {
   filesRead: number
   filesEdited: number
   turns: number
+  /** Events-derived prompt count, preserved for the Prompts card's
+   *  discrepancy indicator when transcript data overrides userPrompts. */
+  userPromptsFromEvents: number
   agentUsage: AgentTokenUsage[]
   totalTokens: { input: number; output: number; cacheRead: number; cacheCreation: number }
   /** Raw session duration in milliseconds (lastTs - firstTs). Used by
@@ -680,19 +685,7 @@ function computeStats(events: ParsedEvent[], sessionId: string): SessionStatsDat
 
   // Duration
   const durationMs = lastTs - firstTs
-  let duration: string
-  if (durationMs < 60_000) duration = `${Math.round(durationMs / 1000)}s`
-  else if (durationMs < 3_600_000) duration = `${Math.round(durationMs / 60_000)}m`
-  else if (durationMs < 86_400_000) {
-    const h = Math.floor(durationMs / 3_600_000)
-    const m = Math.round((durationMs % 3_600_000) / 60_000)
-    duration = `${h}h ${m}m`
-  } else {
-    const d = Math.floor(durationMs / 86_400_000)
-    const h = Math.floor((durationMs % 86_400_000) / 3_600_000)
-    const m = Math.round((durationMs % 3_600_000) / 60_000)
-    duration = `${d}d ${h}h ${m}m`
-  }
+  const duration = formatStatsDuration(durationMs)
 
   // Tool success rate
   const totalCompleted = postToolUseCount + postToolUseFailureCount
@@ -735,11 +728,58 @@ function computeStats(events: ParsedEvent[], sessionId: string): SessionStatsDat
     filesRead: filesReadSet.size,
     filesEdited: filesEditedSet.size,
     turns,
+    userPromptsFromEvents: userPrompts,
     agentUsage,
     totalTokens,
     sessionDurationMs: durationMs,
     mainAgentToolCount,
   }
+}
+
+/**
+ * Override events-derived counts with JSONL-authoritative values when
+ * a transcript is available. The events-derived `stats` stays as the
+ * fallback shape; we only swap the fields the transcript covers.
+ *
+ * The transcript's `toolStats` is preferred for the All Tools table —
+ * it counts pre-plugin tool calls that events would miss. The
+ * `longestToolCall` card stays events-derived because clicking it
+ * needs an eventId to scroll to; the transcript has only tool_use_ids.
+ */
+function mergeStatsWithTranscript(
+  base: SessionStatsData,
+  transcript: TranscriptStatsData,
+): SessionStatsData {
+  const summary = transcript.summary
+  const tools: ToolStat[] = summary.toolStats.length > 0 ? summary.toolStats : base.tools
+  return {
+    ...base,
+    duration: summary.durationMs != null ? formatStatsDuration(summary.durationMs) : base.duration,
+    sessionDurationMs: summary.durationMs ?? base.sessionDurationMs,
+    toolCalls: summary.toolCalls || base.toolCalls,
+    filesRead: summary.filesRead || base.filesRead,
+    filesEdited: summary.filesEdited || base.filesEdited,
+    gitCommits: summary.gitCommits || base.gitCommits,
+    // JSONL-derived count (deduped by uuid, internal injects filtered).
+    // Captures pre-plugin prompts on resumed sessions that events miss.
+    userPrompts: summary.userPrompts || base.userPrompts,
+    tools,
+  }
+}
+
+/** Compact duration format for the Duration stat card (no seconds when >= 1m). */
+function formatStatsDuration(ms: number): string {
+  if (ms < 60_000) return `${Math.round(ms / 1000)}s`
+  if (ms < 3_600_000) return `${Math.round(ms / 60_000)}m`
+  if (ms < 86_400_000) {
+    const h = Math.floor(ms / 3_600_000)
+    const m = Math.round((ms % 3_600_000) / 60_000)
+    return `${h}h ${m}m`
+  }
+  const d = Math.floor(ms / 86_400_000)
+  const h = Math.floor((ms % 86_400_000) / 3_600_000)
+  const m = Math.round((ms % 3_600_000) / 60_000)
+  return `${d}d ${h}h ${m}m`
 }
 
 export function formatDuration(ms: number): string {
@@ -783,35 +823,84 @@ function SessionStats({ sessionId }: { sessionId: string }) {
 
   const agents = useAgents(sessionId, events)
 
-  const stats = useMemo(
-    () => (events ? computeStats(events, sessionId) : null),
-    [events, sessionId],
-  )
+  // Set of prompt texts the plugin captured a UserPromptSubmit event
+  // for. Lets the prompts table render rows without a matching event
+  // (pre-plugin prompts on resumed sessions) as muted/non-clickable.
+  const eventPromptTexts = useMemo(() => {
+    const s = new Set<string>()
+    if (!events) return s
+    for (const e of events) {
+      if (e.hookName !== 'UserPromptSubmit') continue
+      const p = (e.payload as any)?.prompt
+      if (typeof p === 'string') s.add(p)
+    }
+    return s
+  }, [events])
+
+  // Transcript stats — same query key as TokenUsageSection so the
+  // round-trip is deduped. When the server flag is off (or the
+  // transcript file is missing) data is undefined and we render
+  // events-only.
+  const { data: health } = useQuery({
+    queryKey: ['server-health'],
+    queryFn: getServerHealth,
+    staleTime: Infinity,
+    refetchOnWindowFocus: false,
+  })
+  const transcriptStatsEnabled = health?.transcriptStatsEnabled === true
+  const { data: transcriptResponse } = useQuery({
+    queryKey: ['transcript-stats', sessionId],
+    queryFn: () => api.getTranscriptStats(sessionId),
+    enabled: transcriptStatsEnabled,
+    staleTime: Infinity,
+    gcTime: 0,
+    refetchOnWindowFocus: false,
+  })
+  const transcript = transcriptResponse?.ok ? transcriptResponse.data : null
+
+  const stats = useMemo(() => {
+    if (!events) return null
+    const base = computeStats(events, sessionId)
+    if (!transcript) return base
+    // JSONL is authoritative for tool / file / commit counts and
+    // overall duration (events miss pre-plugin activity on resumed
+    // sessions). Per-tool stats also come from the transcript; the
+    // longest-tool card stays events-derived since it needs eventId
+    // for navigation.
+    return mergeStatsWithTranscript(base, transcript)
+  }, [events, sessionId, transcript])
 
   // Click handlers for agent / prompt rows — close the modal and scroll
-  // the event stream to the relevant event.
-  const scrollToAgent = (agentId: string) => {
-    if (!events) return
-    const first = events.find((e) => e.agentId === agentId)
-    if (!first) return
-    setScrollToEventId(first.id)
-    setEditingSessionId(null)
-  }
-  const scrollToPrompt = (promptText: string, promptTimestamp: number) => {
-    if (!events) return
-    // Match by prompt text + closest timestamp. Falls back to text-only.
-    const ups = events.filter(
-      (e) => e.hookName === 'UserPromptSubmit' && (e.payload as any)?.prompt === promptText,
-    )
-    if (ups.length === 0) return
-    const closest = ups.reduce((best, e) =>
-      Math.abs(e.timestamp - promptTimestamp) < Math.abs(best.timestamp - promptTimestamp)
-        ? e
-        : best,
-    )
-    setScrollToEventId(closest.id)
-    setEditingSessionId(null)
-  }
+  // the event stream to the relevant event. useCallback so stable refs
+  // don't bust TokenUsageSection's downstream useMemos every render.
+  const scrollToAgent = useCallback(
+    (agentId: string) => {
+      if (!events) return
+      const first = events.find((e) => e.agentId === agentId)
+      if (!first) return
+      setScrollToEventId(first.id)
+      setEditingSessionId(null)
+    },
+    [events, setScrollToEventId, setEditingSessionId],
+  )
+  const scrollToPrompt = useCallback(
+    (promptText: string, promptTimestamp: number) => {
+      if (!events) return
+      // Match by prompt text + closest timestamp. Falls back to text-only.
+      const ups = events.filter(
+        (e) => e.hookName === 'UserPromptSubmit' && (e.payload as any)?.prompt === promptText,
+      )
+      if (ups.length === 0) return
+      const closest = ups.reduce((best, e) =>
+        Math.abs(e.timestamp - promptTimestamp) < Math.abs(best.timestamp - promptTimestamp)
+          ? e
+          : best,
+      )
+      setScrollToEventId(closest.id)
+      setEditingSessionId(null)
+    },
+    [events, setScrollToEventId, setEditingSessionId],
+  )
 
   if (isLoading || !stats) {
     return (
@@ -827,7 +916,33 @@ function SessionStats({ sessionId }: { sessionId: string }) {
       <StatCard label="Duration" value={stats.duration} />
       <StatCard label="Events" value={stats.totalEvents.toLocaleString()} />
       <StatCard label="Tool Calls" value={stats.toolCalls.toLocaleString()} />
-      <StatCard label="Prompts" value={stats.userPrompts.toLocaleString()} />
+      <StatCard
+        label="Prompts"
+        value={stats.userPrompts.toLocaleString()}
+        secondary={
+          stats.userPromptsFromEvents !== stats.userPrompts
+            ? `/ ${stats.userPromptsFromEvents.toLocaleString()}`
+            : undefined
+        }
+        tooltip={
+          stats.userPromptsFromEvents !== stats.userPrompts ? (
+            <div className="space-y-1.5">
+              <div>
+                <span className="font-medium">{stats.userPrompts.toLocaleString()}</span> prompts
+                from the JSONL transcript.
+              </div>
+              <div>
+                <span className="font-medium">{stats.userPromptsFromEvents.toLocaleString()}</span>{' '}
+                captured UserPromptSubmit hook events.
+              </div>
+              <div className="text-muted-foreground">
+                The difference can be prompts from other plugins that don't fire UserPromptSubmit,
+                or prompts from before observe was capturing on a resumed session.
+              </div>
+            </div>
+          ) : undefined
+        }
+      />
       <StatCard label="Subagents" value={stats.subagentsSpawned.toLocaleString()} />
       <StatCard label="Success" value={stats.toolSuccessRate} />
     </div>
@@ -985,6 +1100,7 @@ function SessionStats({ sessionId }: { sessionId: string }) {
         mainAgentToolCount={stats.mainAgentToolCount}
         onAgentClick={scrollToAgent}
         onPromptClick={scrollToPrompt}
+        eventPromptTexts={eventPromptTexts}
       />
     </div>
   )
@@ -1096,12 +1212,47 @@ function SessionLabelsTab({ sessionId }: { sessionId: string }) {
   )
 }
 
-function StatCard({ label, value }: { label: string; value: string }) {
-  return (
+function StatCard({
+  label,
+  value,
+  secondary,
+  tooltip,
+}: {
+  label: string
+  value: string
+  /** Optional muted suffix rendered after the main value (e.g. "/ 99"). */
+  secondary?: string
+  /** Radix tooltip content. When provided, the whole card becomes
+   *  hoverable + cursor-help. */
+  tooltip?: React.ReactNode
+}) {
+  const body = (
     <div className="rounded-md bg-muted/30 px-3 py-2">
       <div className="text-[10px] text-muted-foreground/70">{label}</div>
-      <div className="text-sm font-medium">{value}</div>
+      <div className="text-sm font-medium">
+        {value}
+        {secondary && (
+          <span className="ml-1 text-muted-foreground/50 text-[11px] font-normal">{secondary}</span>
+        )}
+      </div>
     </div>
+  )
+  if (!tooltip) return body
+  return (
+    <TooltipProvider delayDuration={300}>
+      <Tooltip>
+        <TooltipTrigger asChild>
+          <div className="cursor-help">{body}</div>
+        </TooltipTrigger>
+        <TooltipContent
+          side="bottom"
+          align="start"
+          className="!bg-popover !text-popover-foreground border border-border max-w-xs p-3 text-xs leading-relaxed shadow-md"
+        >
+          {tooltip}
+        </TooltipContent>
+      </Tooltip>
+    </TooltipProvider>
   )
 }
 
