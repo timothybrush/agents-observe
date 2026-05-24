@@ -4,6 +4,7 @@ import { api, type TranscriptStatsData } from '@/lib/api-client'
 import { getServerHealth } from '@/lib/server-health'
 import { useUIStore } from '@/stores/ui-store'
 import { Dialog, DialogContent, DialogClose, DialogTitle } from '@/components/ui/dialog'
+import { Tooltip, TooltipTrigger, TooltipContent, TooltipProvider } from '@/components/ui/tooltip'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Spinner } from '@/components/shared/loading-states'
@@ -518,6 +519,9 @@ interface SessionStatsData {
   filesRead: number
   filesEdited: number
   turns: number
+  /** Events-derived prompt count, preserved for the Prompts card's
+   *  discrepancy indicator when transcript data overrides userPrompts. */
+  userPromptsFromEvents: number
   agentUsage: AgentTokenUsage[]
   totalTokens: { input: number; output: number; cacheRead: number; cacheCreation: number }
   /** Raw session duration in milliseconds (lastTs - firstTs). Used by
@@ -724,6 +728,7 @@ function computeStats(events: ParsedEvent[], sessionId: string): SessionStatsDat
     filesRead: filesReadSet.size,
     filesEdited: filesEditedSet.size,
     turns,
+    userPromptsFromEvents: userPrompts,
     agentUsage,
     totalTokens,
     sessionDurationMs: durationMs,
@@ -904,7 +909,33 @@ function SessionStats({ sessionId }: { sessionId: string }) {
       <StatCard label="Duration" value={stats.duration} />
       <StatCard label="Events" value={stats.totalEvents.toLocaleString()} />
       <StatCard label="Tool Calls" value={stats.toolCalls.toLocaleString()} />
-      <StatCard label="Prompts" value={stats.userPrompts.toLocaleString()} />
+      <StatCard
+        label="Prompts"
+        value={stats.userPrompts.toLocaleString()}
+        secondary={
+          stats.userPromptsFromEvents !== stats.userPrompts
+            ? `/ ${stats.userPromptsFromEvents.toLocaleString()}`
+            : undefined
+        }
+        tooltip={
+          stats.userPromptsFromEvents !== stats.userPrompts ? (
+            <div className="space-y-1.5">
+              <div>
+                <span className="font-medium">{stats.userPrompts.toLocaleString()}</span> prompts
+                from the JSONL transcript.
+              </div>
+              <div>
+                <span className="font-medium">{stats.userPromptsFromEvents.toLocaleString()}</span>{' '}
+                captured UserPromptSubmit hook events.
+              </div>
+              <div className="text-muted-foreground">
+                The difference can be prompts from other plugins that don't fire UserPromptSubmit,
+                or prompts from before observe was capturing on a resumed session.
+              </div>
+            </div>
+          ) : undefined
+        }
+      />
       <StatCard label="Subagents" value={stats.subagentsSpawned.toLocaleString()} />
       <StatCard label="Success" value={stats.toolSuccessRate} />
     </div>
@@ -1174,12 +1205,47 @@ function SessionLabelsTab({ sessionId }: { sessionId: string }) {
   )
 }
 
-function StatCard({ label, value }: { label: string; value: string }) {
-  return (
+function StatCard({
+  label,
+  value,
+  secondary,
+  tooltip,
+}: {
+  label: string
+  value: string
+  /** Optional muted suffix rendered after the main value (e.g. "/ 99"). */
+  secondary?: string
+  /** Radix tooltip content. When provided, the whole card becomes
+   *  hoverable + cursor-help. */
+  tooltip?: React.ReactNode
+}) {
+  const body = (
     <div className="rounded-md bg-muted/30 px-3 py-2">
       <div className="text-[10px] text-muted-foreground/70">{label}</div>
-      <div className="text-sm font-medium">{value}</div>
+      <div className="text-sm font-medium">
+        {value}
+        {secondary && (
+          <span className="ml-1 text-muted-foreground/50 text-[11px] font-normal">{secondary}</span>
+        )}
+      </div>
     </div>
+  )
+  if (!tooltip) return body
+  return (
+    <TooltipProvider delayDuration={300}>
+      <Tooltip>
+        <TooltipTrigger asChild>
+          <div className="cursor-help">{body}</div>
+        </TooltipTrigger>
+        <TooltipContent
+          side="bottom"
+          align="start"
+          className="!bg-popover !text-popover-foreground border border-border max-w-xs p-3 text-xs leading-relaxed shadow-md"
+        >
+          {tooltip}
+        </TooltipContent>
+      </Tooltip>
+    </TooltipProvider>
   )
 }
 

@@ -446,6 +446,7 @@ export function TokenUsageSection({
         {
           key: 'prompt',
           label: 'Prompt',
+          count: transcript.prompts.length,
           sortType: 'string',
           render: (r) => {
             // Only prompts with a matching UserPromptSubmit event can
@@ -575,6 +576,7 @@ export function TokenUsageSection({
     {
       key: 'agent',
       label: 'Agent',
+      count: agentRows.length,
       sortType: 'string',
       render: (r) =>
         r.isMain ? (
@@ -683,9 +685,15 @@ export function TokenUsageSection({
     ? ({ key: 'cost', dir: 'desc' } as const)
     : ({ key: 'duration', dir: 'desc' } as const)
 
+  const agentTotalCell = (
+    <span className="uppercase text-[9px] tracking-wide">
+      Total
+      <span className="ml-1.5 text-muted-foreground/50 normal-case">({agentRows.length})</span>
+    </span>
+  )
   const agentFooter = hasTranscript
     ? [
-        <span className="uppercase text-[9px] tracking-wide">Total</span>,
+        agentTotalCell,
         null,
         agentTotals.durationMs > 0 ? fmtMs(agentTotals.durationMs) : '—',
         fmt(agentTotals.toolCount),
@@ -696,7 +704,7 @@ export function TokenUsageSection({
         <span className="text-amber-500">{fmtCents(agentTotals.costCents)}</span>,
       ]
     : [
-        <span className="uppercase text-[9px] tracking-wide">Total</span>,
+        agentTotalCell,
         null,
         agentTotals.durationMs > 0 ? fmtMs(agentTotals.durationMs) : '—',
         fmt(agentTotals.toolCount),
@@ -774,6 +782,7 @@ export function TokenUsageSection({
             columns={agentCols}
             defaultSort={defaultSort}
             footer={agentFooter}
+            initialMaxRows={20}
           />
         </div>
 
@@ -791,8 +800,14 @@ export function TokenUsageSection({
                 rows={transcript.prompts}
                 columns={promptCols}
                 defaultSort={{ key: 'cost', dir: 'desc' }}
+                initialMaxRows={50}
                 footer={[
-                  <span className="uppercase text-[9px] tracking-wide">Total</span>,
+                  <span className="uppercase text-[9px] tracking-wide">
+                    Total
+                    <span className="ml-1.5 text-muted-foreground/50 normal-case">
+                      ({transcript.prompts.length})
+                    </span>
+                  </span>,
                   fmtMs(promptTotals.durationMs),
                   fmt(promptTotals.toolCount),
                   fmt(promptTotals.requests),

@@ -4,6 +4,10 @@ import { cn } from '@/lib/utils'
 export interface SortableColumn<T> {
   key: string
   label: string
+  /** Optional count rendered in muted gray after the label, e.g.
+   *  "Agent (12)". Useful for showing row counts alongside the column
+   *  name on header + totals row. */
+  count?: number
   sortType: 'string' | 'number'
   align?: 'left' | 'right'
   render: (row: T) => ReactNode
@@ -24,6 +28,11 @@ export interface SortableTableProps<T> {
    * order as `columns`). Use `null` for cells you want empty.
    */
   footer?: (ReactNode | null)[]
+  /** Cap on rows rendered when collapsed. When rows.length exceeds
+   *  this, a "View more (N)" toggle is shown above the footer. Sort
+   *  applies to the full list before slicing, so the visible top-N
+   *  reflects the active sort. */
+  initialMaxRows?: number
 }
 
 /**
@@ -32,8 +41,15 @@ export interface SortableTableProps<T> {
  * the sort there in its default direction (desc for number, asc for
  * string).
  */
-export function SortableTable<T>({ rows, columns, defaultSort, footer }: SortableTableProps<T>) {
+export function SortableTable<T>({
+  rows,
+  columns,
+  defaultSort,
+  footer,
+  initialMaxRows,
+}: SortableTableProps<T>) {
   const [sort, setSort] = useState(defaultSort)
+  const [expanded, setExpanded] = useState(false)
 
   const sortedRows = useMemo(() => {
     const col = columns.find((c) => c.key === sort.key)
@@ -49,6 +65,13 @@ export function SortableTable<T>({ rows, columns, defaultSort, footer }: Sortabl
     })
     return sort.dir === 'desc' ? sorted.reverse() : sorted
   }, [rows, columns, sort])
+
+  // Slice after sort so the visible window reflects the current order.
+  const hiddenCount =
+    initialMaxRows && !expanded && sortedRows.length > initialMaxRows
+      ? sortedRows.length - initialMaxRows
+      : 0
+  const visibleRows = hiddenCount > 0 ? sortedRows.slice(0, initialMaxRows) : sortedRows
 
   function onHeaderClick(col: SortableColumn<T>) {
     setSort((cur) => {
@@ -78,6 +101,9 @@ export function SortableTable<T>({ rows, columns, defaultSort, footer }: Sortabl
                 )}
               >
                 {col.label}
+                {typeof col.count === 'number' && (
+                  <span className="ml-1.5 text-muted-foreground/50 font-normal">({col.count})</span>
+                )}
                 {indicator && <span className="ml-1">{indicator}</span>}
               </th>
             )
@@ -85,7 +111,7 @@ export function SortableTable<T>({ rows, columns, defaultSort, footer }: Sortabl
         </tr>
       </thead>
       <tbody className="font-mono">
-        {sortedRows.map((row, i) => (
+        {visibleRows.map((row, i) => (
           <tr key={i} className="border-b border-border/40">
             {columns.map((col) => (
               <td
@@ -101,6 +127,19 @@ export function SortableTable<T>({ rows, columns, defaultSort, footer }: Sortabl
             ))}
           </tr>
         ))}
+        {hiddenCount > 0 && (
+          <tr className="border-b border-border/40">
+            <td colSpan={columns.length} className="py-1.5 px-2 text-center">
+              <button
+                type="button"
+                onClick={() => setExpanded(true)}
+                className="text-muted-foreground hover:text-foreground cursor-pointer hover:underline text-xs"
+              >
+                View more ({hiddenCount})
+              </button>
+            </td>
+          </tr>
+        )}
       </tbody>
       {footer && (
         <tfoot className="font-mono">
