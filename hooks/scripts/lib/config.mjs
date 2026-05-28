@@ -236,6 +236,12 @@ export function getServerEnv(config) {
     AGENTS_OBSERVE_DB_PATH: isDocker
       ? `/data/${config.databaseFileName}`
       : resolve(config.dataDir, config.databaseFileName),
+    // Host-side bind mount target for the DB. In docker mode the server
+    // surfaces this in /api/health so the dashboard can show the user
+    // where the DB lives on their machine, not /data/observe.db inside
+    // the container. Unset in local mode (DB_PATH already is the host
+    // path) — server falls back to DB_PATH.
+    AGENTS_OBSERVE_HOST_DB_PATH: isDocker ? resolve(config.dataDir, config.databaseFileName) : '',
     AGENTS_OBSERVE_CLIENT_DIST_PATH: config.isDevRuntime
       ? '' // vite dev server serves the client
       : isDocker

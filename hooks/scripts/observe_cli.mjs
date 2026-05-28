@@ -108,10 +108,9 @@ async function healthCommand(exit = true) {
     if (isDocker) {
       console.log(`  Container Name: ${config.containerName}`)
       console.log(`  Image: ${config.dockerImage}`)
-      console.log(`  Data Dir: ${config.dataDir} (bind mounted)`)
-    } else {
-      console.log(`  Database: ${b.dbPath || 'unknown'}`)
     }
+    // Always the host-side path (server returns hostDbPath as dbPath).
+    console.log(`  Database: ${b.dbPath || 'unknown'}${isDocker ? ' (bind mounted)' : ''}`)
     console.log(`  Log Level: ${b.logLevel || 'unknown'}`)
 
     if (config.expectedVersion && b.version && config.expectedVersion !== b.version) {

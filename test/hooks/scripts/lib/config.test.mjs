@@ -434,6 +434,16 @@ describe('getServerEnv', () => {
     expect(env.AGENTS_OBSERVE_STORAGE_ADAPTER).toBe('sqlite')
   })
 
+  it('sets HOST_DB_PATH to the host bind mount target in docker', async () => {
+    const mod = await loadModule()
+    const cfg = mod.getConfig({ runtime: 'docker' })
+    const env = mod.getServerEnv(cfg)
+
+    expect(env.AGENTS_OBSERVE_HOST_DB_PATH).toBe(`${cfg.dataDir}/observe.db`)
+    // Container-side DB_PATH is unchanged.
+    expect(env.AGENTS_OBSERVE_DB_PATH).toBe('/data/observe.db')
+  })
+
   it('uses host paths for local runtime', async () => {
     const mod = await loadModule()
     const cfg = mod.getConfig({ runtime: 'local' })
@@ -445,6 +455,9 @@ describe('getServerEnv', () => {
     expect(env.AGENTS_OBSERVE_CLIENT_DIST_PATH).toContain('app/client/dist')
     expect(env.AGENTS_OBSERVE_CLIENT_DIST_PATH).toContain(cfg.installDir)
     expect(env.AGENTS_OBSERVE_RUNTIME).toBe('local')
+    // In local mode the server falls back to DB_PATH, so HOST_DB_PATH
+    // is left empty to keep the env minimal.
+    expect(env.AGENTS_OBSERVE_HOST_DB_PATH).toBe('')
   })
 
   it('sets empty CLIENT_DIST_PATH and RUNTIME_DEV for dev runtime', async () => {

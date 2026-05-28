@@ -40,6 +40,15 @@ export const config = {
   logLevel,
   verbose: logLevel === 'debug' || logLevel === 'trace',
   dbPath: resolve(process.env.AGENTS_OBSERVE_DB_PATH || '../../data/observe.db'),
+  // Host-side bind mount target for the DB. Set by the CLI when starting
+  // the docker container so the dashboard can show the user where the DB
+  // lives on their machine rather than the in-container `/data/observe.db`.
+  // Falls back to `dbPath` in local mode (where they're already the same).
+  hostDbPath: resolve(
+    process.env.AGENTS_OBSERVE_HOST_DB_PATH ||
+      process.env.AGENTS_OBSERVE_DB_PATH ||
+      '../../data/observe.db',
+  ),
   // Directory for persistent server state outside the SQLite DB —
   // currently just the models.dev pricing cache. Derived from dbPath so
   // the docker volume mount covers both files.

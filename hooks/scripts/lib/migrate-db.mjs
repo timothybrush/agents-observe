@@ -24,8 +24,15 @@ const DB_SIDECAR_SUFFIXES = ['', '-wal', '-shm']
  *
  * Locations scanned:
  *   - ~/.claude/plugins/cache/<plugin>/<plugin>/<version>/data/data/observe.db
- *   - ~/.claude/plugins/cache/<plugin>/<plugin>/<version>/data/observe.db
- *   - ~/.<plugin>/data/observe.db (older non-Claude fallback)
+ *     and    .../<version>/data/observe.db
+ *     (the #17 case — DB ended up under the version-scoped install dir)
+ *   - ~/.claude/plugins/data/<plugin>*\/observe.db
+ *     and          .../<plugin>*\/data/observe.db
+ *     (Claude plugin data dirs other than the current one — covers users
+ *     whose old AGENTS_OBSERVE_DATA_DIR pointed at the plugin data root,
+ *     and users who switched between --plugin-dir and marketplace
+ *     installs, leaving the DB behind in the sibling dir.)
+ *   - ~/.<plugin>/data/observe.db (legacy per-user fallback)
  */
 export function scanLegacyDbCandidates(config) {
   const { homeDir, pluginName, databaseFileName, dataDir } = config
@@ -33,14 +40,17 @@ export function scanLegacyDbCandidates(config) {
 
   const newDbPath = resolve(dataDir, databaseFileName)
   const candidates = []
+  const pushIfDb = (p) => {
+    if (p !== newDbPath && existsSync(p)) candidates.push(p)
+  }
 
+  // Version-scoped install cache dir (the #17 case).
   const cacheRoot = resolve(homeDir, '.claude/plugins/cache', pluginName, pluginName)
   if (existsSync(cacheRoot)) {
     try {
       for (const version of readdirSync(cacheRoot)) {
         for (const suffix of ['data/data', 'data']) {
-          const p = join(cacheRoot, version, suffix, databaseFileName)
-          if (p !== newDbPath && existsSync(p)) candidates.push(p)
+          pushIfDb(join(cacheRoot, version, suffix, databaseFileName))
         }
       }
     } catch {
@@ -48,8 +58,29 @@ export function scanLegacyDbCandidates(config) {
     }
   }
 
-  const legacyHome = resolve(homeDir, `.${pluginName}`, 'data', databaseFileName)
-  if (legacyHome !== newDbPath && existsSync(legacyHome)) candidates.push(legacyHome)
+  // Sibling plugin data dirs. Claude Code names these as
+  // `<plugin>-<marketplace>` (e.g. agents-observe-agents-observe) or
+  // `<plugin>-inline` for --plugin-dir installs. After upgrades or env
+  // changes a DB can be orphaned in one of them.
+  const pluginsDataRoot = resolve(homeDir, '.claude/plugins/data')
+  if (existsSync(pluginsDataRoot)) {
+    try {
+      for (const entry of readdirSync(pluginsDataRoot)) {
+        if (entry !== pluginName && !entry.startsWith(`${pluginName}-`)) continue
+        const dir = join(pluginsDataRoot, entry)
+        // Either layout: DB directly at the root (the "DATA_DIR pointed at
+        // plugin data root" case) or under a /data subdir (the normal post-fix
+        // layout for a sibling install).
+        pushIfDb(join(dir, databaseFileName))
+        pushIfDb(join(dir, 'data', databaseFileName))
+      }
+    } catch {
+      // unreadable plugins/data dir — nothing to do
+    }
+  }
+
+  // Legacy per-user fallback (~/.<plugin>/data/observe.db).
+  pushIfDb(resolve(homeDir, `.${pluginName}`, 'data', databaseFileName))
 
   return candidates
     .map((path) => {
@@ -112,11 +143,10 @@ export function maybeMigrateLegacyDb(config, log = console) {
   if (candidates.length === 0) return null
 
   const [fromDbPath, ...skipped] = candidates
-  if (skipped.length > 0) {
-    log.warn?.(
-      `Found ${candidates.length} legacy DB candidates; using newest by mtime: ${fromDbPath}`,
-    )
-    for (const s of skipped) log.warn?.(`  skipped: ${s}`)
+  if (candidates.length > 1) {
+    log.warn?.(`Found ${candidates.length} legacy DB candidates (newest first):`)
+    log.warn?.(`  → ${fromDbPath} (migrating this one)`)
+    for (const s of skipped) log.warn?.(`    ${s}`)
   }
 
   return migrateLegacyDb({
