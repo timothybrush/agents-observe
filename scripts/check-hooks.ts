@@ -26,7 +26,7 @@ const TARGETS = ['hooks/hooks.json']
 // Hooks that replace default Claude Code behavior and MUST NOT be registered
 // by an observability plugin. Registering these delegates critical functionality
 // to our hook, which we don't implement.
-const BLACKLIST = new Set(['WorktreeCreate'])
+const BLACKLIST = new Set(['WorktreeCreate', 'MessageDisplay'])
 
 // Path prefixes used in each file — stripped for comparison
 const PATH_PREFIXES = [
