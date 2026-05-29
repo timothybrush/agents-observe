@@ -1,5 +1,13 @@
 # Changelog
 
+## v0.9.10 — Subagent token attribution and Workflow event tracking
+
+This release adds token cost attribution for subagents and workflows, so the tokens they consume are now traced back to the prompt that triggered them. It also improves Workflow tool tracking by correctly pairing pre- and post-execution events and rendering their details in the dashboard.
+
+### Features
+
+- Subagent and workflow token costs are now attributed to the originating prompt, giving you accurate per-prompt cost breakdowns.
+
 ## v0.9.9 — Stable database location across plugin upgrades
 
 This release keeps your event database in a stable location so it survives plugin upgrades, with expanded scanning to automatically migrate databases from older layouts. The dashboard now shows the host bind mount path, and the `/observe logs` command has been split into separate server, CLI, and MCP log views.
