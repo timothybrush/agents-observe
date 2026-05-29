@@ -1,24 +1,46 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useUIStore } from '@/stores/ui-store'
 import { useNotificationStore } from '@/components/sidebar/notification-indicator'
+import { useWindowedSessions } from '@/hooks/use-windowed-sessions'
 import type { DashboardThemeProps } from '../../types'
 import type { RecentSession } from '@/types'
 import {
-  WORLD_W,
-  WORLD_H,
   radius,
   heat,
-  layoutWells,
+  packProjects,
   stepSimulation,
   type SimNode,
   type Well,
+  type Bounds,
 } from './physics'
 import { PALETTES, parseColor, resolvePaletteId, tempColor, type RGB } from './palettes'
 import { DrillIn } from './drill-in'
+import {
+  DEFAULT_WINDOW_MS,
+  DEFAULT_VIEW_H,
+  windowPosToMs,
+  windowMsToPos,
+  zoomPosToViewH,
+  viewHToZoomPos,
+  zoomPercent,
+  fmtDuration,
+} from './scale'
+import { Settings } from 'lucide-react'
 import './constellation.css'
 
 const PALETTE_STORAGE_KEY = 'agents-observe-constellation-palette'
-const ZOOM_W = 560 // viewBox width when drilled into a session
+const WINDOW_STORAGE_KEY = 'agents-observe-constellation-window'
+const ZOOM_STORAGE_KEY = 'agents-observe-constellation-zoom'
+const COLLAPSED_STORAGE_KEY = 'agents-observe-constellation-collapsed'
+const DRAG_THRESH = 6 // px of movement before a press counts as a pan, not a click
+const BOUNDS_PAD = 140 // world-unit margin around content (star clamp + pan overscroll)
+const SMALL_WELL_R = 88 // wells below this only label on hover
+const DRILL_VIEW_H = 520 // world height when drilled into a session
+// Well size reflects activity across the *window*, so it uses a much longer
+// half-life than the star glow's τ (which is a live, seconds-scale signal).
+// A project touched an hour ago should still read as "big", not collapse to
+// the floor. ~4h gives a smooth falloff over the 24h window.
+const WELL_TAU_SEC = 4 * 60 * 60
 
 interface NodeMeta {
   id: string
@@ -38,8 +60,36 @@ interface NodeEls {
   label: SVGTextElement | null
 }
 
+interface Cam {
+  cx: number
+  cy: number
+  w: number
+  h: number
+}
+
 function projectKeyOf(s: RecentSession): string {
   return s.projectId != null ? `p${s.projectId}` : 'unassigned'
+}
+
+const clampNum = (v: number, lo: number, hi: number) => (v < lo ? lo : v > hi ? hi : v)
+
+function camViewBox(c: Cam): [number, number, number, number] {
+  return [c.cx - c.w / 2, c.cy - c.h / 2, c.w, c.h]
+}
+
+function clampCam(cam: Cam, b: Bounds): Cam {
+  const pad = BOUNDS_PAD
+  const worldW = b.maxX + pad - (b.minX - pad)
+  const worldH = b.maxY + pad - (b.minY - pad)
+  const cx =
+    cam.w >= worldW
+      ? (b.minX + b.maxX) / 2
+      : clampNum(cam.cx, b.minX - pad + cam.w / 2, b.maxX + pad - cam.w / 2)
+  const cy =
+    cam.h >= worldH
+      ? (b.minY + b.maxY) / 2
+      : clampNum(cam.cy, b.minY - pad + cam.h / 2, b.maxY + pad - cam.h / 2)
+  return { cx, cy, w: cam.w, h: cam.h }
 }
 
 // Native palette RGBs as a safe default until the first getComputedStyle read.
@@ -49,7 +99,7 @@ const DEFAULT_RGB = { cool: [91, 107, 130], warm: [250, 204, 21], hot: [249, 115
   hot: RGB
 }
 
-export function ConstellationView({ sessions, isLoading, onOpenSession }: DashboardThemeProps) {
+export function ConstellationView({ onOpenSession }: DashboardThemeProps) {
   const containerRef = useRef<HTMLDivElement>(null)
   const svgRef = useRef<SVGSVGElement>(null)
   const drillLayerRef = useRef<SVGGElement>(null)
@@ -61,6 +111,18 @@ export function ConstellationView({ sessions, isLoading, onOpenSession }: Dashbo
   const [reduced, setReduced] = useState(false)
   const [tau, setTau] = useState(90)
   const [focusedId, setFocusedId] = useState<string | null>(null)
+  const [windowMs, setWindowMs] = useState(
+    () => Number(localStorage.getItem(WINDOW_STORAGE_KEY)) || DEFAULT_WINDOW_MS,
+  )
+  const [viewH, setViewH] = useState(
+    () => Number(localStorage.getItem(ZOOM_STORAGE_KEY)) || DEFAULT_VIEW_H,
+  )
+  const [collapsed, setCollapsed] = useState(
+    () => localStorage.getItem(COLLAPSED_STORAGE_KEY) === '1',
+  )
+
+  // The constellation renders an activity window, not the host's recent-30.
+  const { data: sessions = [], isLoading } = useWindowedSessions(windowMs)
 
   // Attention flags from the global notification store (pending && !dismissed).
   const pending = useNotificationStore((s) => s.pending)
@@ -71,7 +133,6 @@ export function ConstellationView({ sessions, isLoading, onOpenSession }: Dashbo
     return set
   }, [pending, dismissed])
 
-  // Node descriptors derived from the session list.
   const nodes = useMemo<NodeMeta[]>(
     () =>
       sessions.map((s) => ({
@@ -87,22 +148,43 @@ export function ConstellationView({ sessions, isLoading, onOpenSession }: Dashbo
     [sessions],
   )
 
-  const wells = useMemo<Well[]>(() => {
-    const keys: string[] = []
-    const seen = new Set<string>()
-    for (const n of nodes)
-      if (!seen.has(n.projectKey)) {
-        seen.add(n.projectKey)
-        keys.push(n.projectKey)
+  // Pack project wells, sized by aggregate recency heat (busiest = biggest,
+  // centred). Recomputed when the session set changes (which happens on each
+  // WS-driven refetch), so sizes track real activity; CSS transitions smooth it.
+  const {
+    wells,
+    bounds: worldBounds,
+    wellNames,
+  } = useMemo(() => {
+    const now = Date.now()
+    const byProject = new Map<
+      string,
+      { name: string; score: number; count: number; sumR: number }
+    >()
+    for (const s of sessions) {
+      const key = projectKeyOf(s)
+      const e = byProject.get(key) ?? {
+        name: s.projectName || (s.projectId == null ? 'Unassigned' : `project ${s.projectId}`),
+        score: 0,
+        count: 0,
+        sumR: 0,
       }
-    return layoutWells(keys)
-  }, [nodes])
-
-  const wellNames = useMemo(() => {
-    const m = new Map<string, string>()
-    for (const n of nodes) if (!m.has(n.projectKey)) m.set(n.projectKey, n.projectName)
-    return m
-  }, [nodes])
+      e.score += heat(s.lastActivity, now, WELL_TAU_SEC)
+      e.count += 1
+      e.sumR += radius(s.eventCount)
+      byProject.set(key, e)
+    }
+    const items = [...byProject.entries()].map(([key, e]) => ({
+      key,
+      score: e.score,
+      // containment floor: enough room for the project's stars to orbit.
+      containR: Math.max(60, 30 + 9 * Math.sqrt(e.count) + e.sumR / Math.max(1, e.count)),
+    }))
+    const packed = packProjects(items)
+    const names = new Map<string, string>()
+    for (const [key, e] of byProject) names.set(key, e.name)
+    return { wells: packed.wells, bounds: packed.bounds, wellNames: names }
+  }, [sessions])
 
   // ---- imperative state shared with the animation loop (no re-render) ----
   const simRef = useRef(new Map<string, SimNode>())
@@ -115,8 +197,25 @@ export function ConstellationView({ sessions, isLoading, onOpenSession }: Dashbo
   const focusedRef = useRef<string | null>(null)
   const paletteRgbRef = useRef(DEFAULT_RGB)
   const tauRef = useRef(tau)
-  const vbRef = useRef<[number, number, number, number]>([0, 0, WORLD_W, WORLD_H])
-  const targetVbRef = useRef<[number, number, number, number]>([0, 0, WORLD_W, WORLD_H])
+  const viewHRef = useRef(viewH)
+
+  // camera / pan
+  const containerSizeRef = useRef({ w: 1, h: 1 })
+  const worldBoundsRef = useRef<Bounds>(worldBounds)
+  const paddedBoundsRef = useRef<Bounds>(worldBounds)
+  const camRef = useRef<Cam>({ cx: 0, cy: 0, w: DEFAULT_VIEW_H * 1.6, h: viewH })
+  const camInitedRef = useRef(false)
+  const viewRef = useRef<[number, number, number, number]>([
+    -DEFAULT_VIEW_H * 0.8,
+    -viewH / 2,
+    DEFAULT_VIEW_H * 1.6,
+    viewH,
+  ])
+  const drillBoxRef = useRef<[number, number, number, number] | null>(null)
+  const draggingRef = useRef(false)
+  const movedRef = useRef(false)
+  const capturedRef = useRef(false)
+  const panStartRef = useRef({ x: 0, y: 0, cx: 0, cy: 0 })
 
   useEffect(() => {
     flaggedRef.current = flaggedSet
@@ -128,8 +227,40 @@ export function ConstellationView({ sessions, isLoading, onOpenSession }: Dashbo
     focusedRef.current = focusedId
   }, [focusedId])
 
-  // Keep the sim map in sync with the node list: spawn new nodes near their
-  // well center, drop departed ones.
+  const camSize = useCallback((): { w: number; h: number } => {
+    const { w, h } = containerSizeRef.current
+    const aspect = w && h ? w / h : 16 / 9
+    const vh = viewHRef.current
+    return { w: vh * aspect, h: vh }
+  }, [])
+
+  // Zoom: resize the camera when the zoom slider changes (the loop eases the
+  // viewBox toward it, so zoom animates smoothly). Persist the choice.
+  // NOT gated on camInited — a window change clears that flag to force a
+  // recenter, and gating here would silently swallow zoom in that interval.
+  // Resizing camRef is always safe: the loop follows it, and the pending
+  // recenter re-derives its size from camSize() (this viewH).
+  useEffect(() => {
+    viewHRef.current = viewH
+    localStorage.setItem(ZOOM_STORAGE_KEY, String(viewH))
+    camRef.current = clampCam({ ...camRef.current, ...camSize() }, worldBoundsRef.current)
+  }, [viewH, camSize])
+
+  // Measure the container for px↔world conversion and camera aspect.
+  useEffect(() => {
+    const el = containerRef.current
+    if (!el) return
+    const measure = () => {
+      containerSizeRef.current = { w: el.clientWidth, h: el.clientHeight }
+    }
+    measure()
+    if (typeof ResizeObserver === 'undefined') return
+    const ro = new ResizeObserver(measure)
+    ro.observe(el)
+    return () => ro.disconnect()
+  }, [])
+
+  // Keep sim ↔ node list in sync; spawn new stars near their well centre.
   useEffect(() => {
     const wellByKey = new Map(wells.map((w) => [w.key, w]))
     wellByKeyRef.current = wellByKey
@@ -137,14 +268,12 @@ export function ConstellationView({ sessions, isLoading, onOpenSession }: Dashbo
     const live = new Set(nodes.map((n) => n.id))
     for (const id of [...sim.keys()]) if (!live.has(id)) sim.delete(id)
     for (const n of nodes) {
+      const w = wellByKey.get(n.projectKey)
       if (!sim.has(n.id)) {
-        const w = wellByKey.get(n.projectKey)
-        const cx = w ? w.cx : WORLD_W / 2
-        const cy = w ? w.cy : WORLD_H / 2
         sim.set(n.id, {
           id: n.id,
-          x: cx + (Math.random() - 0.5) * 140,
-          y: cy + (Math.random() - 0.5) * 140,
+          x: (w ? w.cx : 0) + (Math.random() - 0.5) * 120,
+          y: (w ? w.cy : 0) + (Math.random() - 0.5) * 120,
           vx: 0,
           vy: 0,
           projectKey: n.projectKey,
@@ -163,6 +292,29 @@ export function ConstellationView({ sessions, isLoading, onOpenSession }: Dashbo
     orbitIdsRef.current = new Set(nodes.filter((n) => n.orbitDots > 0).map((n) => n.id))
   }, [nodes, wells])
 
+  // Update world bounds + camera on layout changes; center on the busiest well once.
+  useEffect(() => {
+    worldBoundsRef.current = worldBounds
+    paddedBoundsRef.current = {
+      minX: worldBounds.minX - BOUNDS_PAD,
+      minY: worldBounds.minY - BOUNDS_PAD,
+      maxX: worldBounds.maxX + BOUNDS_PAD,
+      maxY: worldBounds.maxY + BOUNDS_PAD,
+    }
+    if (!wells.length) return
+    const busiest = wells.reduce((m, w) => (w.r > m.r ? w : m), wells[0])
+    const size = camSize()
+    if (!camInitedRef.current) {
+      camRef.current = clampCam({ cx: busiest.cx, cy: busiest.cy, ...size }, worldBounds)
+      viewRef.current = [...camViewBox(camRef.current)]
+      svgRef.current?.setAttribute('viewBox', viewRef.current.join(' '))
+      camInitedRef.current = true
+    } else {
+      // keep current pan valid against the new bounds/size
+      camRef.current = clampCam({ ...camRef.current, ...size }, worldBounds)
+    }
+  }, [wells, worldBounds, camSize])
+
   // Recompute cached palette RGBs whenever the palette changes.
   useEffect(() => {
     const el = containerRef.current
@@ -179,7 +331,6 @@ export function ConstellationView({ sessions, isLoading, onOpenSession }: Dashbo
     }
   }, [paletteId])
 
-  // Register a node group's elements (cheap querySelector on mount/structure change).
   const registerNode = useCallback((id: string, g: SVGGElement | null) => {
     if (!g) {
       elRef.current.delete(id)
@@ -216,21 +367,27 @@ export function ConstellationView({ sessions, isLoading, onOpenSession }: Dashbo
       }
 
       if (!focusedRef.current) {
-        stepSimulation(simListRef.current, wellByKeyRef.current, hasOrbit)
+        stepSimulation(simListRef.current, wellByKeyRef.current, hasOrbit, paddedBoundsRef.current)
       }
 
-      // viewBox easing
-      const vb = vbRef.current
-      const tvb = targetVbRef.current
-      let moved = false
-      for (let i = 0; i < 4; i++) {
-        const d = tvb[i] - vb[i]
-        if (Math.abs(d) > 0.5) {
-          vb[i] += d * 0.14
-          moved = true
-        } else vb[i] = tvb[i]
+      // camera: snap to pan while dragging, else ease toward target (pan or drill box)
+      const target =
+        focusedRef.current && drillBoxRef.current ? drillBoxRef.current : camViewBox(camRef.current)
+      const vb = viewRef.current
+      if (draggingRef.current && !focusedRef.current) {
+        for (let i = 0; i < 4; i++) vb[i] = target[i]
+        svgRef.current?.setAttribute('viewBox', vb.join(' '))
+      } else {
+        let moved = false
+        for (let i = 0; i < 4; i++) {
+          const d = target[i] - vb[i]
+          if (Math.abs(d) > 0.5) {
+            vb[i] += d * 0.16
+            moved = true
+          } else vb[i] = target[i]
+        }
+        if (moved) svgRef.current?.setAttribute('viewBox', vb.join(' '))
       }
-      if (moved && svgRef.current) svgRef.current.setAttribute('viewBox', vb.join(' '))
 
       for (const m of metas) {
         const s = sim.get(m.id)
@@ -261,10 +418,10 @@ export function ConstellationView({ sessions, isLoading, onOpenSession }: Dashbo
     return () => cancelAnimationFrame(raf)
   }, [])
 
-  // ---- interactions ----
+  // ---- tooltip ----
   const showTooltip = (e: React.MouseEvent, m: NodeMeta) => {
     const t = tooltipRef.current
-    if (!t) return
+    if (!t || draggingRef.current) return
     const flagged = flaggedRef.current.has(m.id)
     t.style.opacity = '1'
     t.style.left = `${e.clientX}px`
@@ -279,27 +436,85 @@ export function ConstellationView({ sessions, isLoading, onOpenSession }: Dashbo
     if (tooltipRef.current) tooltipRef.current.style.opacity = '0'
   }
 
+  // ---- focus / drill-in ----
   const focus = (id: string) => {
     const s = simRef.current.get(id)
     if (!s) return
-    const zh = (ZOOM_W * WORLD_H) / WORLD_W
-    targetVbRef.current = [s.x - ZOOM_W / 2, s.y - zh / 2, ZOOM_W, zh]
+    const { w: cw, h: ch } = containerSizeRef.current
+    const aspect = cw && ch ? cw / ch : 16 / 9
+    const zh = DRILL_VIEW_H
+    const zw = zh * aspect
+    drillBoxRef.current = [s.x - zw / 2, s.y - zh / 2, zw, zh]
     setFocusedId(id)
     hideTooltip()
-    // Mirror the focus into the sidebar (expand project + highlight session)
-    // without navigating away from the constellation.
     const sess = sessions.find((x) => x.id === id)
     useUIStore.getState().setPreviewSession(id, sess?.projectId ?? null)
   }
   const unfocus = useCallback(() => {
-    targetVbRef.current = [0, 0, WORLD_W, WORLD_H]
+    drillBoxRef.current = null
     setFocusedId(null)
     useUIStore.getState().clearPreviewSession()
   }, [])
 
-  // Drop the sidebar preview if the constellation unmounts while focused
-  // (e.g. switching dashboard theme, or navigating into a session).
   useEffect(() => () => useUIStore.getState().clearPreviewSession(), [])
+
+  // ---- pan (drag the canvas) ----
+  const onPointerDown = (e: React.PointerEvent) => {
+    if (focusedRef.current) return
+    // Arm a potential pan, but DON'T capture the pointer yet — capturing on
+    // press would steal the `click` from a star and break drill-in. We capture
+    // only once movement crosses the drag threshold (in onPointerMove).
+    draggingRef.current = true
+    movedRef.current = false
+    panStartRef.current = {
+      x: e.clientX,
+      y: e.clientY,
+      cx: camRef.current.cx,
+      cy: camRef.current.cy,
+    }
+  }
+  const onPointerMove = (e: React.PointerEvent) => {
+    if (!draggingRef.current) return
+    const st = panStartRef.current
+    const dx = e.clientX - st.x
+    const dy = e.clientY - st.y
+    if (!movedRef.current) {
+      if (Math.abs(dx) + Math.abs(dy) <= DRAG_THRESH) return // still a click, not a pan
+      movedRef.current = true
+      svgRef.current?.setPointerCapture?.(e.pointerId)
+      capturedRef.current = true
+      if (svgRef.current) svgRef.current.style.cursor = 'grabbing'
+    }
+    const perPx = camRef.current.w / (containerSizeRef.current.w || 1)
+    camRef.current = clampCam(
+      { ...camRef.current, cx: st.cx - dx * perPx, cy: st.cy - dy * perPx },
+      worldBoundsRef.current,
+    )
+  }
+  const onPointerUp = (e: React.PointerEvent) => {
+    draggingRef.current = false
+    if (capturedRef.current) {
+      svgRef.current?.releasePointerCapture?.(e.pointerId)
+      capturedRef.current = false
+    }
+    if (svgRef.current) svgRef.current.style.cursor = ''
+  }
+  const onBackgroundClick = () => {
+    if (movedRef.current) {
+      movedRef.current = false
+      return
+    }
+    if (focusedId) unfocus()
+  }
+  const recenter = useCallback(() => {
+    const ws = wells
+    if (!ws.length) return
+    const busiest = ws.reduce((m, w) => (w.r > m.r ? w : m), ws[0])
+    camRef.current = clampCam(
+      { cx: busiest.cx, cy: busiest.cy, ...camSize() },
+      worldBoundsRef.current,
+    )
+  }, [wells, camSize])
 
   const focusedSim = focusedId ? simRef.current.get(focusedId) : null
 
@@ -307,12 +522,25 @@ export function ConstellationView({ sessions, isLoading, onOpenSession }: Dashbo
     setPaletteId(id)
     localStorage.setItem(PALETTE_STORAGE_KEY, id)
   }
+  const onWindowChange = (ms: number) => {
+    setWindowMs(ms)
+    localStorage.setItem(WINDOW_STORAGE_KEY, String(ms))
+    // The visible projects change with the window — recenter on the next pack.
+    camInitedRef.current = false
+  }
+  const onToggleCollapsed = () => {
+    setCollapsed((c) => {
+      const next = !c
+      localStorage.setItem(COLLAPSED_STORAGE_KEY, next ? '1' : '0')
+      return next
+    })
+  }
 
   if (!isLoading && sessions.length === 0) {
     return (
       <div className="constellation flex items-center justify-center" data-palette={paletteId}>
         <div className="text-sm" style={{ color: 'var(--c-muted)' }}>
-          No sessions yet — they'll appear here as agents connect.
+          No sessions active in the last 24 hours.
         </div>
       </div>
     )
@@ -331,20 +559,35 @@ export function ConstellationView({ sessions, isLoading, onOpenSession }: Dashbo
       <svg
         ref={svgRef}
         className="constellation__svg"
-        viewBox={`0 0 ${WORLD_W} ${WORLD_H}`}
+        viewBox="-800 -500 1600 1000"
         preserveAspectRatio="xMidYMid slice"
-        onClick={() => focusedId && unfocus()}
+        onPointerDown={onPointerDown}
+        onPointerMove={onPointerMove}
+        onPointerUp={onPointerUp}
+        onClick={onBackgroundClick}
+        onDoubleClick={() => !focusedId && recenter()}
       >
         <g className="cst-field">
-          {wells.map((w) => (
-            <g key={w.key}>
-              <circle className="cst-well" cx={w.cx} cy={w.cy} r={w.r} />
-              <circle className="cst-well-ring" cx={w.cx} cy={w.cy} r={w.r} />
-              <text className="cst-well-label" x={w.cx} y={w.cy - w.r - 10}>
-                {wellNames.get(w.key)}
-              </text>
-            </g>
-          ))}
+          {wells.map((w) => {
+            const small = w.r < SMALL_WELL_R
+            return (
+              <g
+                key={w.key}
+                className="cst-well-g"
+                style={{ transform: `translate(${w.cx}px, ${w.cy}px)` }}
+              >
+                <circle className="cst-well" cx={0} cy={0} r={w.r} />
+                <circle className="cst-well-ring" cx={0} cy={0} r={w.r} />
+                <text
+                  className={'cst-well-label' + (small ? ' cst-well-label--small' : '')}
+                  x={0}
+                  y={-w.r - 10}
+                >
+                  {wellNames.get(w.key)}
+                </text>
+              </g>
+            )
+          })}
           {nodes.map((m) => {
             const orbitR = m.baseR + 16
             const flagged = flaggedSet.has(m.id)
@@ -357,6 +600,10 @@ export function ConstellationView({ sessions, isLoading, onOpenSession }: Dashbo
                 onMouseLeave={hideTooltip}
                 onClick={(e) => {
                   e.stopPropagation()
+                  if (movedRef.current) {
+                    movedRef.current = false
+                    return
+                  }
                   focus(m.id)
                 }}
               >
@@ -435,12 +682,19 @@ export function ConstellationView({ sessions, isLoading, onOpenSession }: Dashbo
       )}
 
       <ConstellationControls
+        collapsed={collapsed}
+        onToggleCollapsed={onToggleCollapsed}
         paletteId={paletteId}
         onPalette={selectPalette}
+        windowMs={windowMs}
+        onWindow={onWindowChange}
+        viewH={viewH}
+        onZoom={setViewH}
         reduced={reduced}
         onReduced={setReduced}
         tau={tau}
         onTau={setTau}
+        onRecenter={recenter}
       />
 
       <div className="cst-tooltip" ref={tooltipRef} />
@@ -449,56 +703,112 @@ export function ConstellationView({ sessions, isLoading, onOpenSession }: Dashbo
 }
 
 interface ControlsProps {
+  collapsed: boolean
+  onToggleCollapsed: () => void
   paletteId: string
   onPalette: (id: string) => void
+  windowMs: number
+  onWindow: (ms: number) => void
+  viewH: number
+  onZoom: (vh: number) => void
   reduced: boolean
   onReduced: (v: boolean) => void
   tau: number
   onTau: (v: number) => void
+  onRecenter: () => void
 }
 
 function ConstellationControls({
+  collapsed,
+  onToggleCollapsed,
   paletteId,
   onPalette,
+  windowMs,
+  onWindow,
+  viewH,
+  onZoom,
   reduced,
   onReduced,
   tau,
   onTau,
+  onRecenter,
 }: ControlsProps) {
   return (
-    <div className="cst-panel cst-controls">
-      <div className="cst-panel-h">Palette</div>
-      <div className="cst-row">
-        {PALETTES.map((p) => (
-          <button
-            key={p.id}
-            className={'cst-btn' + (p.id === paletteId ? ' cst-btn--on' : '')}
-            onClick={() => onPalette(p.id)}
-          >
-            {p.name}
-          </button>
-        ))}
-      </div>
-      <div className="cst-row cst-row--center">
-        <label htmlFor="cst-tau">decay τ</label>
-        <input
-          id="cst-tau"
-          type="range"
-          min={15}
-          max={300}
-          value={tau}
-          onChange={(e) => onTau(Number(e.target.value))}
-        />
-        <span className="cst-tau-val">{tau}s</span>
-      </div>
-      <div className="cst-row">
-        <button
-          className={'cst-btn' + (reduced ? ' cst-btn--on' : '')}
-          onClick={() => onReduced(!reduced)}
-        >
-          Reduce motion
-        </button>
-      </div>
+    <div className={'cst-panel cst-controls' + (collapsed ? ' cst-controls--collapsed' : '')}>
+      <button
+        className="cst-gear"
+        onClick={onToggleCollapsed}
+        aria-label={collapsed ? 'Show controls' : 'Hide controls'}
+        title={collapsed ? 'Show controls' : 'Hide controls'}
+      >
+        <Settings className="h-4 w-4" />
+      </button>
+      {!collapsed && (
+        <div className="cst-controls-body">
+          <div className="cst-panel-h">Palette</div>
+          <div className="cst-row">
+            {PALETTES.map((p) => (
+              <button
+                key={p.id}
+                className={'cst-btn' + (p.id === paletteId ? ' cst-btn--on' : '')}
+                onClick={() => onPalette(p.id)}
+              >
+                {p.name}
+              </button>
+            ))}
+          </div>
+          <div className="cst-slider">
+            <label htmlFor="cst-window">window</label>
+            <input
+              id="cst-window"
+              type="range"
+              min={0}
+              max={1}
+              step={0.001}
+              value={windowMsToPos(windowMs)}
+              onChange={(e) => onWindow(windowPosToMs(Number(e.target.value)))}
+            />
+            <span>{fmtDuration(windowMs)}</span>
+          </div>
+          <div className="cst-slider">
+            <label htmlFor="cst-zoom">zoom</label>
+            <input
+              id="cst-zoom"
+              type="range"
+              min={0}
+              max={1}
+              step={0.01}
+              value={viewHToZoomPos(viewH)}
+              onChange={(e) => onZoom(zoomPosToViewH(Number(e.target.value)))}
+            />
+            <span>{zoomPercent(viewH)}%</span>
+          </div>
+          <div className="cst-slider">
+            <label htmlFor="cst-tau">decay τ</label>
+            <input
+              id="cst-tau"
+              type="range"
+              min={15}
+              max={300}
+              value={tau}
+              onChange={(e) => onTau(Number(e.target.value))}
+            />
+            <span>{tau}s</span>
+          </div>
+          <div className="cst-row">
+            <button
+              className={'cst-btn' + (reduced ? ' cst-btn--on' : '')}
+              onClick={() => onReduced(!reduced)}
+            >
+              Reduce motion
+            </button>
+            <button className="cst-btn" onClick={onRecenter}>
+              Recenter
+            </button>
+          </div>
+          <div className="cst-meta">drag to pan · double-click to recenter</div>
+        </div>
+      )}
     </div>
   )
 }

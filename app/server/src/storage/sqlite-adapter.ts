@@ -1270,11 +1270,18 @@ export class SqliteAdapter implements EventStore {
     return { events, agents }
   }
 
-  async getRecentSessions(limit: number = 20): Promise<any[]> {
+  async getRecentSessions(limit: number = 20, since?: number): Promise<any[]> {
     // LEFT JOIN so orphaned sessions (project deleted out from under them)
     // still appear in the recent list. The repairOrphans pass should make
     // this rare, but the LEFT JOIN is defensive — without it, an orphaned
     // active session would silently disappear from the UI.
+    //
+    // `since` (epoch ms) bounds the result to a recent activity window — the
+    // Constellation dashboard uses it so only sessions active within the
+    // window appear. Filters on the same COALESCE expression the list is
+    // ordered by, so the cutoff matches "last activity".
+    const whereClause = since != null ? 'WHERE COALESCE(s.last_activity, s.started_at) >= ?' : ''
+    const params = since != null ? [since, limit] : [limit]
     return this.db
       .prepare(
         `
@@ -1291,11 +1298,12 @@ export class SqliteAdapter implements EventStore {
         ) AS agent_classes
       FROM sessions s
       LEFT JOIN projects p ON p.id = s.project_id
+      ${whereClause}
       ORDER BY COALESCE(s.last_activity, s.started_at) DESC
       LIMIT ?
     `,
       )
-      .all(limit)
+      .all(...params)
   }
 
   async getUnassignedSessions(limit: number = 100): Promise<any[]> {

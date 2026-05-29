@@ -182,6 +182,20 @@ describe('SqliteAdapter — projects', () => {
     expect(recent[0].project_slug).toBe('proj1')
     expect(recent[0].project_name).toBe('Project One')
   })
+
+  test('getRecentSessions(limit, since) returns only sessions active at/after the cutoff', async () => {
+    const projId = await store.createProject('proj1', 'Project One')
+    await store.upsertSession('old', projId, null, null, 1000)
+    await store.upsertSession('edge', projId, null, null, 3000)
+    await store.upsertSession('new', projId, null, null, 5000)
+
+    const windowed = await store.getRecentSessions(20, 3000)
+    expect(windowed.map((r) => r.id)).toEqual(['new', 'edge']) // newest first, 'old' excluded
+
+    // No `since` → unfiltered (all three).
+    const all = await store.getRecentSessions(20)
+    expect(all).toHaveLength(3)
+  })
 })
 
 // ---------------------------------------------------------------------------

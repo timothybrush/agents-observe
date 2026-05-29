@@ -91,8 +91,13 @@ export const api = {
   getProjects: () => fetchJson<Project[]>('/projects'),
   getPendingNotifications: (sinceTs: number) =>
     fetchJson<NotificationPayload[]>(`/notifications?since=${sinceTs}`),
-  getRecentSessions: (limit?: number) =>
-    fetchJson<RecentSession[]>(`/sessions/recent${limit ? `?limit=${limit}` : ''}`),
+  getRecentSessions: (limit?: number, since?: number) => {
+    const params = new URLSearchParams()
+    if (limit) params.set('limit', String(limit))
+    if (since != null) params.set('since', String(since))
+    const qs = params.toString()
+    return fetchJson<RecentSession[]>(`/sessions/recent${qs ? `?${qs}` : ''}`)
+  },
   getUnassignedSessions: (limit?: number) =>
     fetchJson<RecentSession[]>(`/sessions/unassigned${limit ? `?limit=${limit}` : ''}`),
   getSessions: (projectId: number) => fetchJson<Session[]>(`/projects/${projectId}/sessions`),

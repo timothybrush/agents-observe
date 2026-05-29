@@ -5,6 +5,12 @@ import { useUIStore } from '@/stores/ui-store'
 import { ConstellationView } from './constellation-view'
 import type { RecentSession } from '@/types'
 
+// The constellation fetches its own activity-windowed sessions; mock that hook.
+let mockWindowed: { data: RecentSession[]; isLoading: boolean } = { data: [], isLoading: false }
+vi.mock('@/hooks/use-windowed-sessions', () => ({
+  useWindowedSessions: () => mockWindowed,
+}))
+
 function session(id: string, over: Partial<RecentSession> = {}): RecentSession {
   return {
     id,
@@ -24,42 +30,39 @@ function session(id: string, over: Partial<RecentSession> = {}): RecentSession {
   }
 }
 
+const props = { sessions: [], isLoading: false, onOpenSession: () => {} }
+
 afterEach(() => {
   cleanup()
   useUIStore.getState().clearPreviewSession()
+  mockWindowed = { data: [], isLoading: false }
 })
 
 describe('ConstellationView', () => {
   it('mounts and renders a star + well label per session/project without throwing', () => {
-    renderWithProviders(
-      <ConstellationView
-        sessions={[
-          session('swift-otter'),
-          session('calm-harbor', { projectName: 'beta', projectId: 2 }),
-        ]}
-        isLoading={false}
-        onOpenSession={() => {}}
-      />,
-    )
+    mockWindowed = {
+      data: [
+        session('swift-otter'),
+        session('calm-harbor', { projectName: 'beta', projectId: 2, projectSlug: 'beta' }),
+      ],
+      isLoading: false,
+    }
+    renderWithProviders(<ConstellationView {...props} />)
     expect(screen.getByText('swift-otter')).toBeTruthy()
     expect(screen.getByText('calm-harbor')).toBeTruthy()
-    // project well labels
-    expect(screen.getByText('alpha')).toBeTruthy()
+    expect(screen.getByText('alpha')).toBeTruthy() // well label
     expect(screen.getByText('beta')).toBeTruthy()
-    // palette control present
-    expect(screen.getByText('Deep Space')).toBeTruthy()
+    expect(screen.getByText('Deep Space')).toBeTruthy() // palette control
   })
 
-  it('shows an empty state when there are no sessions', () => {
-    renderWithProviders(
-      <ConstellationView sessions={[]} isLoading={false} onOpenSession={() => {}} />,
-    )
-    expect(screen.getByText(/No sessions yet/i)).toBeTruthy()
+  it('shows an empty state when there are no sessions in the window', () => {
+    mockWindowed = { data: [], isLoading: false }
+    renderWithProviders(<ConstellationView {...props} />)
+    expect(screen.getByText(/No sessions active in the last 24 hours/i)).toBeTruthy()
   })
 
   it('runs its animation frame without error', () => {
-    // Fire exactly one frame: the loop re-schedules itself, so only invoke
-    // the first callback (subsequent re-schedules are no-ops).
+    mockWindowed = { data: [session('a')], isLoading: false }
     let fired = false
     const raf = vi
       .spyOn(globalThis, 'requestAnimationFrame')
@@ -70,31 +73,37 @@ describe('ConstellationView', () => {
         }
         return 0
       })
-    expect(() =>
-      renderWithProviders(
-        <ConstellationView sessions={[session('a')]} isLoading={false} onOpenSession={() => {}} />,
-      ),
-    ).not.toThrow()
+    expect(() => renderWithProviders(<ConstellationView {...props} />)).not.toThrow()
     raf.mockRestore()
   })
 
+  it('renders inline sliders and collapses the controls to a gear', () => {
+    mockWindowed = { data: [session('a')], isLoading: false }
+    renderWithProviders(<ConstellationView {...props} />)
+    // sliders present
+    expect(screen.getByText('window')).toBeTruthy()
+    expect(screen.getByText('zoom')).toBeTruthy()
+    expect(screen.getByText('decay τ')).toBeTruthy()
+    expect(screen.getByText('Deep Space')).toBeTruthy() // palette visible while expanded
+
+    fireEvent.click(screen.getByLabelText('Hide controls'))
+    expect(screen.queryByText('Deep Space')).toBeNull() // body collapsed
+    expect(screen.getByLabelText('Show controls')).toBeTruthy() // gear remains
+
+    fireEvent.click(screen.getByLabelText('Show controls'))
+    expect(screen.getByText('Deep Space')).toBeTruthy() // expanded again
+  })
+
   it('sets the sidebar preview on focus and clears it on background click', () => {
-    const { container } = renderWithProviders(
-      <ConstellationView
-        sessions={[session('swift-otter', { projectId: 7 })]}
-        isLoading={false}
-        onOpenSession={() => {}}
-      />,
-    )
+    mockWindowed = { data: [session('swift-otter', { projectId: 7 })], isLoading: false }
+    const { container } = renderWithProviders(<ConstellationView {...props} />)
     expect(useUIStore.getState().previewSessionId).toBeNull()
 
-    // Click the star (the slug label lives inside the clickable star <g>).
     const star = screen.getByText('swift-otter').closest('g.cst-star')!
     fireEvent.click(star)
     expect(useUIStore.getState().previewSessionId).toBe('swift-otter')
     expect(useUIStore.getState().previewProjectId).toBe(7)
 
-    // Clicking the empty background unfocuses and clears the preview.
     fireEvent.click(container.querySelector('svg')!)
     expect(useUIStore.getState().previewSessionId).toBeNull()
   })

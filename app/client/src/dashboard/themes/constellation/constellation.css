@@ -66,7 +66,28 @@
   width: 100%;
   height: 100%;
   display: block;
+  cursor: grab;
+  touch-action: none; /* let pointer-drag pan instead of scrolling */
+}
+.constellation--focused .constellation__svg {
   cursor: default;
+}
+
+/* wells glide when a re-pack moves/resizes them */
+.cst-well-g {
+  transition: transform 0.6s ease;
+}
+.cst-well,
+.cst-well-ring {
+  transition: r 0.6s ease;
+}
+/* small/idle wells only label on hover (declutter) */
+.cst-well-label--small {
+  opacity: 0;
+  transition: opacity 0.15s;
+}
+.cst-well-g:hover .cst-well-label--small {
+  opacity: 0.85;
 }
 
 /* ---- nodes ---- */
@@ -231,7 +252,33 @@
 .cst-controls {
   top: 12px;
   right: 12px;
-  width: 224px;
+  width: 240px;
+}
+/* collapsed → just the gear at the panel's top-right corner */
+.cst-controls--collapsed {
+  width: auto;
+  padding: 5px;
+}
+.cst-gear {
+  position: absolute;
+  top: 7px;
+  right: 7px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: transparent;
+  border: none;
+  color: var(--c-muted);
+  cursor: pointer;
+  padding: 4px;
+  border-radius: 7px;
+}
+.cst-gear:hover {
+  color: var(--c-fg);
+  background: oklch(0.27 0 0);
+}
+.cst-controls--collapsed .cst-gear {
+  position: static;
 }
 .cst-panel-h {
   font-size: 11px;
@@ -239,6 +286,27 @@
   letter-spacing: 0.8px;
   color: var(--c-muted);
   margin-bottom: 8px;
+  padding-right: 22px; /* clear the gear */
+}
+/* inline slider row: label · slider · value(right) */
+.cst-slider {
+  display: grid;
+  grid-template-columns: 52px 1fr 42px;
+  align-items: center;
+  gap: 9px;
+  margin-bottom: 8px;
+  font-size: 11px;
+  color: var(--c-muted);
+}
+.cst-slider input[type='range'] {
+  width: 100%;
+  accent-color: var(--c-warm);
+  height: 4px;
+  cursor: pointer;
+}
+.cst-slider span {
+  text-align: right;
+  color: var(--c-fg);
 }
 .cst-row {
   display: flex;
@@ -284,6 +352,11 @@
   min-width: 34px;
   text-align: right;
   color: var(--c-fg);
+}
+.cst-meta {
+  font-size: 10px;
+  color: var(--c-muted);
+  margin-top: 8px;
 }
 
 .cst-tooltip {

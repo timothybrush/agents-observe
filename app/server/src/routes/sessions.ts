@@ -49,7 +49,10 @@ function rowToRecentSession(r: any) {
 router.get('/sessions/recent', async (c) => {
   const store = c.get('store')
   const limit = c.req.query('limit') ? parseInt(c.req.query('limit')!) : 20
-  const rows = await store.getRecentSessions(limit)
+  // Optional activity window: only sessions with last activity >= since (ms).
+  const sinceRaw = c.req.query('since') ? parseInt(c.req.query('since')!) : NaN
+  const since = Number.isFinite(sinceRaw) ? sinceRaw : undefined
+  const rows = await store.getRecentSessions(limit, since)
   return c.json(rows.map(rowToRecentSession))
 })
 
