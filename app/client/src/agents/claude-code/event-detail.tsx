@@ -20,6 +20,7 @@ const ReactDiffViewer = lazy(() => import('react-diff-viewer-continued'))
 import { cn } from '@/lib/utils'
 import { getAgentDisplayName } from '@/lib/agent-utils'
 import { resolveEventIcon } from '@/lib/event-icon-registry'
+import { useUIStore } from '@/stores/ui-store'
 import { getEventSummary, relativePath } from './helpers'
 import { computeRuntimeMs, formatRuntime } from './runtime'
 import type { FrameworkDataApi } from '../types'
@@ -197,8 +198,34 @@ export function ClaudeCodeEventDetail({
 
   const showThread = THREAD_SUBTYPES.includes(event.hookName)
 
-  // Load turn events for thread-style display
+  // Load turn events for thread-style display. Gate on `displayEventStream`
+  // so the thread mirrors the event stream: events excluded by the All filter
+  // (e.g. PostToolBatch) and merge-hidden Post events are dropped. Merged Pre
+  // rows already carry their final status from the store, so dropping the
+  // folded Post events doesn't lose the completed/failed indicator.
   const turnEvents = event.turnId ? dataApi.getTurnEvents(event.turnId) : []
+  const threadRows = showThread ? dedupeThread(turnEvents.filter((e) => e.displayEventStream)) : []
+
+  // Thread collapse is LOCAL to this detail panel, seeded once from the store
+  // default at mount. Toggling writes back to the store so the next expanded
+  // row picks up the choice — but we never subscribe reactively, so toggling
+  // one open thread doesn't collapse every other open detail (which would jump
+  // the virtualizer scroll). Re-expanding a row remounts and re-seeds.
+  const [threadCollapsed, setThreadCollapsedLocal] = useState(
+    () => useUIStore.getState().threadCollapsed,
+  )
+  const toggleThreadCollapsed = () => {
+    const next = !threadCollapsed
+    setThreadCollapsedLocal(next)
+    const store = useUIStore.getState()
+    store.setThreadCollapsed(next)
+    // Ask the stream to re-measure this row synchronously once our height
+    // change commits, so the virtualizer reflows (and anchors scroll) in the
+    // same frame — the same smooth path row expand/collapse gets from its
+    // estimateSize change, rather than the async ResizeObserver reflow that
+    // made thread toggles flash. No-op outside the virtualized stream.
+    store.setThreadRemeasureEventId(event.id)
+  }
 
   // Get grouped events (e.g., Pre + Post for tool calls)
   const groupedEvents = event.groupId ? dataApi.getGroupedEvents(event.groupId) : []
@@ -239,25 +266,9 @@ export function ClaudeCodeEventDetail({
         return ms != null ? <DetailRow label="Runtime" value={formatRuntime(ms)} /> : null
       })()}
 
-      {/* Conversation thread for UserPrompt / Stop / Subagent events */}
-      {showThread && (
-        <div>
-          <div className="text-muted-foreground mb-1.5 font-medium">Conversation thread:</div>
-          {turnEvents.length > 0 ? (
-            <div className="space-y-0.5 rounded border border-border/50 bg-muted/20 p-1.5">
-              {dedupeThread(turnEvents).map((e) => (
-                <ThreadEvent key={e.id} event={e} isCurrentEvent={e.id === event.id} />
-              ))}
-            </div>
-          ) : (
-            <div className="text-muted-foreground/80 dark:text-muted-foreground/60 py-1">
-              No thread events found
-            </div>
-          )}
-        </div>
-      )}
-
-      {/* Raw payload section(s) — two for paired tool rows, one otherwise */}
+      {/* Raw payload section(s) — two for paired tool rows, one otherwise.
+          Kept above the conversation thread so it's reachable without
+          scrolling past a long turn. */}
       {pairedEvent ? (
         <>
           <RawPayloadSection
@@ -277,6 +288,49 @@ export function ClaudeCodeEventDetail({
           timestamp={event.timestamp}
           payload={event.payload as Record<string, unknown>}
         />
+      )}
+
+      {/* Conversation thread for UserPrompt / Stop / Subagent events.
+          Collapsible — collapse state lives in the UI store (session-wide). */}
+      {showThread && (
+        <div>
+          <div
+            className="mb-1.5 flex items-center gap-1 font-medium text-muted-foreground hover:text-foreground transition-colors cursor-pointer"
+            onClick={toggleThreadCollapsed}
+            role="button"
+            tabIndex={0}
+            onKeyDown={(e) => {
+              if (e.key === 'Enter' || e.key === ' ') {
+                e.preventDefault()
+                toggleThreadCollapsed()
+              }
+            }}
+          >
+            {threadCollapsed ? (
+              <ChevronRight className="h-3 w-3" />
+            ) : (
+              <ChevronDown className="h-3 w-3" />
+            )}
+            <span>Conversation thread</span>
+            {threadCollapsed && threadRows.length > 0 && (
+              <span className="ml-1 text-[10px] text-muted-foreground/70 tabular-nums">
+                ({threadRows.length})
+              </span>
+            )}
+          </div>
+          {!threadCollapsed &&
+            (threadRows.length > 0 ? (
+              <div className="space-y-0.5 rounded border border-border/50 bg-muted/20 p-1.5">
+                {threadRows.map((e) => (
+                  <ThreadEvent key={e.id} event={e} isCurrentEvent={e.id === event.id} />
+                ))}
+              </div>
+            ) : (
+              <div className="text-muted-foreground/80 dark:text-muted-foreground/60 py-1">
+                No thread events found
+              </div>
+            ))}
+        </div>
       )}
     </div>
   )
@@ -1324,10 +1378,26 @@ function ThreadEvent({
   const displayLabel = LABEL_MAP[rawLabel] || rawLabel
   const summary = event.summary || getEventSummary(event as any, event.hookName, event.toolName)
 
+  // Clicking scrolls the matching row into view in the event stream. We read
+  // the action lazily from the store at click time (no per-row subscription),
+  // and reuse the existing scrollToEventId effect — which resolves hidden/
+  // merged events and flashes the target — so there are no refs or new state.
+  const scrollToEvent = () => useUIStore.getState().setScrollToEventId(event.id)
+
   return (
     <div
+      role="button"
+      tabIndex={0}
+      title="Scroll to this event in the stream"
+      onClick={scrollToEvent}
+      onKeyDown={(e) => {
+        if (e.key === 'Enter' || e.key === ' ') {
+          e.preventDefault()
+          scrollToEvent()
+        }
+      }}
       className={cn(
-        'flex items-center gap-2 px-2 py-0.5 rounded text-[11px]',
+        'flex items-center gap-2 px-2 py-0.5 rounded text-[11px] cursor-pointer hover:bg-accent/60',
         isCurrentEvent ? 'bg-primary/10 font-medium' : 'text-muted-foreground',
       )}
     >
