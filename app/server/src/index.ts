@@ -32,8 +32,8 @@ store.repairOrphans().then((result) => {
 const app = createApp(store, broadcastToSession, broadcastToAll, broadcastActivity)
 
 function start(retries = 3) {
-  const server = serve({ fetch: app.fetch, port: PORT }, () => {
-    console.log(`Server running on http://localhost:${PORT}`)
+  const server = serve({ fetch: app.fetch, port: PORT, hostname: config.bindHost }, () => {
+    console.log(`Server running on http://localhost:${PORT} (bound to ${config.bindHost})`)
     console.log(`POST events: http://localhost:${PORT}/api/events`)
   })
 

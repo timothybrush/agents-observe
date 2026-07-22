@@ -139,6 +139,20 @@ export function getConfig(overrides = {}) {
     serverPort,
     serverPortFile,
     serverPortFileName,
+    /**
+     * Host interface the server is published on. Loopback by default so the
+     * unauthenticated dashboard/WebSocket is not exposed beyond the local
+     * machine (GitHub issue #22). Set AGENTS_OBSERVE_BIND=0.0.0.0 to allow
+     * LAN access. In docker this is the host side of the `-p` mapping; in
+     * local/dev it's passed to the server as the listen host.
+     */
+    serverBindHost: overrides.bindHost || process.env.AGENTS_OBSERVE_BIND || '127.0.0.1',
+    /**
+     * Raw AGENTS_OBSERVE_CORS_ORIGINS value: a comma-separated allowlist, or
+     * `*` to allow any origin. Empty/unset → the server defaults to
+     * reflecting loopback origins only. Passed through to the server env.
+     */
+    corsOrigins: overrides.corsOrigins || process.env.AGENTS_OBSERVE_CORS_ORIGINS || '',
     apiBaseUrl,
     hasCustomApiUrl: !!customApiBaseUrl,
     baseOrigin,
@@ -249,6 +263,11 @@ export function getServerEnv(config) {
         : resolve(config.installDir, 'app/client/dist'),
     AGENTS_OBSERVE_LOG_LEVEL: config.logLevel,
     AGENTS_OBSERVE_RUNTIME: isDocker ? 'docker' : 'local',
+    // Interface the server binds to. In docker the container must listen on
+    // 0.0.0.0 — the host-side `-p ${bindHost}:...` mapping is what enforces
+    // the loopback boundary. In local/dev the server binds the configured
+    // host directly, defaulting to loopback. See GitHub issue #22.
+    AGENTS_OBSERVE_BIND_HOST: isDocker ? '0.0.0.0' : config.serverBindHost,
     AGENTS_OBSERVE_RUNTIME_DEV: config.isDevRuntime ? '1' : '',
     AGENTS_OBSERVE_SHUTDOWN_DELAY_MS: String(config.shutdownDelayMs),
     ...(config.isDevRuntime && { AGENTS_OBSERVE_DEV_CLIENT_PORT: config.clientPort }),
@@ -266,6 +285,9 @@ export function getServerEnv(config) {
       isDocker && config.transcriptStatsEnabled ? config.transcriptCodexHost : '',
     AGENTS_OBSERVE_TRANSCRIPT_CODEX_CONTAINER_BASE:
       isDocker && config.transcriptStatsEnabled ? '/host/.codex/sessions' : '',
+    // Only forward the CORS allowlist when the user set one; otherwise leave
+    // it unset so the server applies its loopback-reflect default.
+    ...(config.corsOrigins ? { AGENTS_OBSERVE_CORS_ORIGINS: config.corsOrigins } : {}),
   }
 }
 

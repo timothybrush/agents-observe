@@ -37,6 +37,20 @@ export const config = {
   isDev: process.env.AGENTS_OBSERVE_RUNTIME_DEV === '1',
   version: readVersion(),
   port: parseInt(process.env.AGENTS_OBSERVE_SERVER_PORT || '4981', 10),
+  // Interface the HTTP/WebSocket server binds to. Loopback would be the
+  // safest default, but inside docker the container must listen on 0.0.0.0
+  // for the host-side `-p 127.0.0.1:...` mapping to reach it — so the CLI
+  // sets this to 0.0.0.0 in docker and to the user's AGENTS_OBSERVE_BIND
+  // (loopback by default) in local/dev. See GitHub issue #22.
+  bindHost: process.env.AGENTS_OBSERVE_BIND_HOST || '0.0.0.0',
+  // CORS allowlist. Empty → reflect loopback origins only (same-machine
+  // dashboards; the client is served same-origin so this covers normal
+  // use). `*` → allow any origin (opt-in). Otherwise an explicit
+  // comma-separated allowlist.
+  corsAllowedOrigins: (process.env.AGENTS_OBSERVE_CORS_ORIGINS || '')
+    .split(',')
+    .map((s) => s.trim())
+    .filter(Boolean),
   logLevel,
   verbose: logLevel === 'debug' || logLevel === 'trace',
   dbPath: resolve(process.env.AGENTS_OBSERVE_DB_PATH || '../../data/observe.db'),

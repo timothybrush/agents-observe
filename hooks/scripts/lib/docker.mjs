@@ -84,6 +84,17 @@ async function getContainerState(config) {
 // -- Docker lifecycle ---------------------------------------------
 
 /**
+ * Build the `-p` value for `docker run`. Prefixes the host interface so the
+ * published port binds to loopback by default rather than 0.0.0.0, keeping
+ * the unauthenticated dashboard/WebSocket off other interfaces (GitHub
+ * issue #22). Pass hostPort `0` to let docker auto-assign a free host port.
+ * An empty bindHost falls back to docker's default (all interfaces).
+ */
+export function buildPortMapping(bindHost, hostPort, containerPort) {
+  return bindHost ? `${bindHost}:${hostPort}:${containerPort}` : `${hostPort}:${containerPort}`
+}
+
+/**
  * Starts the Docker container. Returns the actual port the server is running on.
  * Handles: version mismatch (restart), port conflict (auto-assign), stale containers.
  *
@@ -211,13 +222,19 @@ export async function startServer(config, log = console) {
   }
 
   // Try preferred port, fall back to auto-assign
-  let runResult = await run('docker', dockerRunArgs(`${preferredPort}:${containerPort}`))
+  let runResult = await run(
+    'docker',
+    dockerRunArgs(buildPortMapping(config.serverBindHost, preferredPort, containerPort)),
+  )
   let actualPort = preferredPort
 
   if (!runResult.ok && runResult.stderr.includes('port is already allocated')) {
     log.warn(`Port ${preferredPort} is in use, auto-assigning a free port...`)
 
-    runResult = await run('docker', dockerRunArgs(`0:${containerPort}`))
+    runResult = await run(
+      'docker',
+      dockerRunArgs(buildPortMapping(config.serverBindHost, 0, containerPort)),
+    )
 
     if (!runResult.ok) {
       log.error(`Failed to start container: ${runResult.stderr}`)

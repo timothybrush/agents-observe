@@ -6,6 +6,7 @@ import path from 'path'
 import fs from 'fs'
 import type { EventStore } from './storage/types'
 import { config } from './config'
+import { resolveCorsOrigin } from './cors'
 
 import eventsRouter from './routes/events'
 import filtersRouter from './routes/filters'
@@ -38,7 +39,7 @@ export function createApp(
 ) {
   const app = new Hono<Env>()
 
-  app.use('*', cors())
+  app.use('*', cors({ origin: resolveCorsOrigin(config.corsAllowedOrigins ?? []) }))
 
   // Inject store and broadcast into all routes
   app.use('*', async (c, next) => {

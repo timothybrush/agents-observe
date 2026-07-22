@@ -24,6 +24,8 @@ const envKeys = [
   'AGENTS_OBSERVE_ALLOW_LOCAL_CALLBACKS',
   'AGENTS_OBSERVE_HOOK_STARTUP_TIMEOUT',
   'AGENTS_OBSERVE_NOTIFICATION_ON_EVENTS',
+  'AGENTS_OBSERVE_BIND',
+  'AGENTS_OBSERVE_CORS_ORIGINS',
 ]
 
 let savedEnv
@@ -126,6 +128,37 @@ describe('config', () => {
   it('accepts runtime via overrides', async () => {
     const cfg = await loadConfig({ runtime: 'dev' })
     expect(cfg.runtime).toBe('dev')
+  })
+
+  // --- Server bind host (issue #22) ---
+
+  it('defaults serverBindHost to loopback', async () => {
+    const cfg = await loadConfig()
+    expect(cfg.serverBindHost).toBe('127.0.0.1')
+  })
+
+  it('reads AGENTS_OBSERVE_BIND', async () => {
+    process.env.AGENTS_OBSERVE_BIND = '0.0.0.0'
+    const cfg = await loadConfig()
+    expect(cfg.serverBindHost).toBe('0.0.0.0')
+  })
+
+  it('accepts bindHost via overrides', async () => {
+    const cfg = await loadConfig({ bindHost: '192.168.1.5' })
+    expect(cfg.serverBindHost).toBe('192.168.1.5')
+  })
+
+  // --- CORS origins (issue #22) ---
+
+  it('defaults corsOrigins to empty', async () => {
+    const cfg = await loadConfig()
+    expect(cfg.corsOrigins).toBe('')
+  })
+
+  it('reads AGENTS_OBSERVE_CORS_ORIGINS', async () => {
+    process.env.AGENTS_OBSERVE_CORS_ORIGINS = 'https://a.example,https://b.example'
+    const cfg = await loadConfig()
+    expect(cfg.corsOrigins).toBe('https://a.example,https://b.example')
   })
 
   // --- isPlugin ---
@@ -470,6 +503,40 @@ describe('getServerEnv', () => {
     expect(env.AGENTS_OBSERVE_RUNTIME).toBe('local')
     expect(env.AGENTS_OBSERVE_RUNTIME_DEV).toBe('1')
     expect(env.AGENTS_OBSERVE_SHUTDOWN_DELAY_MS).toBe(String(cfg.shutdownDelayMs))
+  })
+
+  // --- Bind host + CORS passthrough (issue #22) ---
+
+  it('binds the container to 0.0.0.0 in docker (host -p enforces loopback)', async () => {
+    const mod = await loadModule()
+    const env = mod.getServerEnv(mod.getConfig({ runtime: 'docker' }))
+    expect(env.AGENTS_OBSERVE_BIND_HOST).toBe('0.0.0.0')
+  })
+
+  it('binds the configured host directly in local mode', async () => {
+    const mod = await loadModule()
+    const env = mod.getServerEnv(mod.getConfig({ runtime: 'local' }))
+    expect(env.AGENTS_OBSERVE_BIND_HOST).toBe('127.0.0.1')
+  })
+
+  it('forwards AGENTS_OBSERVE_BIND to the local listen host', async () => {
+    process.env.AGENTS_OBSERVE_BIND = '0.0.0.0'
+    const mod = await loadModule()
+    const env = mod.getServerEnv(mod.getConfig({ runtime: 'local' }))
+    expect(env.AGENTS_OBSERVE_BIND_HOST).toBe('0.0.0.0')
+  })
+
+  it('omits the CORS allowlist env when unset', async () => {
+    const mod = await loadModule()
+    const env = mod.getServerEnv(mod.getConfig({ runtime: 'docker' }))
+    expect(env.AGENTS_OBSERVE_CORS_ORIGINS).toBeUndefined()
+  })
+
+  it('forwards the CORS allowlist env when set', async () => {
+    process.env.AGENTS_OBSERVE_CORS_ORIGINS = 'https://a.example,https://b.example'
+    const mod = await loadModule()
+    const env = mod.getServerEnv(mod.getConfig({ runtime: 'docker' }))
+    expect(env.AGENTS_OBSERVE_CORS_ORIGINS).toBe('https://a.example,https://b.example')
   })
 
   it('always includes log level and storage adapter', async () => {
