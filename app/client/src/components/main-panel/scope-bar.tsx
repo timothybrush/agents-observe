@@ -6,7 +6,6 @@ import { ArrowDownToLine, SquarePen, BarChart3, ChevronsDownUp, ChevronsUpDown }
 
 export function ScopeBar() {
   const {
-    selectedProjectId,
     selectedSessionId,
     autoFollow,
     setAutoFollow,
@@ -16,7 +15,11 @@ export function ScopeBar() {
     setEditingSessionId,
   } = useUIStore()
 
-  if (!selectedProjectId || !selectedSessionId) return null
+  // Only a selected session is required. Unassigned sessions route as
+  // `#/_/<sessionId>` with no project, so selectedProjectId is null — gating
+  // on it here hid the whole bar (agent combobox + session icons) on those
+  // sessions. The bar's contents only depend on the session.
+  if (!selectedSessionId) return null
 
   return (
     <div className="flex items-center gap-2 px-3 py-2 border-b border-border min-h-[40px]">
