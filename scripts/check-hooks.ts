@@ -180,7 +180,7 @@ function aiAnalyzeHooks(hooksDocMd: string): AiAnalysis {
   try {
     const proc = spawnSync(
       'claude',
-      ['-p', prompt, '--model', 'claude-opus-4-7', '--output-format', 'json', '--debug'],
+      ['-p', prompt, '--model', 'claude-opus-4-8', '--output-format', 'json', '--debug'],
       {
         encoding: 'utf8',
         timeout: 120_000,
