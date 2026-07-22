@@ -1,5 +1,5 @@
 import { describe, test, expect } from 'vitest'
-import { isLoopbackOrigin, resolveCorsOrigin } from './cors'
+import { isLoopbackOrigin, isOriginAllowed, isWsOriginAllowed, resolveCorsOrigin } from './cors'
 
 describe('isLoopbackOrigin', () => {
   test('accepts localhost / 127.0.0.1 / ::1 on any port', () => {
@@ -34,5 +34,38 @@ describe('resolveCorsOrigin', () => {
       'https://a.example',
       'https://b.example',
     ])
+  })
+})
+
+describe('isOriginAllowed', () => {
+  test('empty allowlist permits only loopback origins', () => {
+    expect(isOriginAllowed('http://localhost:5174', [])).toBe(true)
+    expect(isOriginAllowed('http://127.0.0.1:4981', [])).toBe(true)
+    expect(isOriginAllowed('https://evil.com', [])).toBe(false)
+  })
+
+  test('wildcard permits any origin', () => {
+    expect(isOriginAllowed('https://evil.com', ['*'])).toBe(true)
+  })
+
+  test('explicit allowlist requires an exact match', () => {
+    const list = ['https://a.example']
+    expect(isOriginAllowed('https://a.example', list)).toBe(true)
+    expect(isOriginAllowed('https://b.example', list)).toBe(false)
+    // A loopback origin is NOT implicitly allowed once an allowlist is set.
+    expect(isOriginAllowed('http://localhost:5174', list)).toBe(false)
+  })
+})
+
+describe('isWsOriginAllowed', () => {
+  test('allows a missing Origin header (non-browser client)', () => {
+    expect(isWsOriginAllowed(undefined, [])).toBe(true)
+    expect(isWsOriginAllowed('', [])).toBe(true)
+  })
+
+  test('applies the shared origin policy when Origin is present', () => {
+    expect(isWsOriginAllowed('http://localhost:5174', [])).toBe(true)
+    expect(isWsOriginAllowed('https://evil.com', [])).toBe(false)
+    expect(isWsOriginAllowed('https://evil.com', ['*'])).toBe(true)
   })
 })

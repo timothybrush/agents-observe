@@ -40,7 +40,7 @@ server directly.
 | --- | --- | --- |
 | `AGENTS_OBSERVE_SERVER_PORT` | `4981` | HTTP + WebSocket port the server listens on. |
 | `AGENTS_OBSERVE_BIND` | `127.0.0.1` | Host interface the server is published on. Loopback by default so the unauthenticated dashboard/WebSocket isn't exposed beyond this machine (issue #22). Set to `0.0.0.0` for LAN access. In docker it's the host side of the `-p` mapping; in local/dev it's the server's listen host. |
-| `AGENTS_OBSERVE_CORS_ORIGINS` | *(unset — loopback origins only)* | Comma-separated CORS allowlist for the browser API. Unset reflects only loopback origins (the client is served same-origin, so this covers normal use). `*` allows any origin (opt-in). |
+| `AGENTS_OBSERVE_CORS_ORIGINS` | *(unset — loopback origins only)* | Comma-separated origin allowlist for the browser API **and the WebSocket handshake**. Unset allows only loopback origins (the client is served same-origin, so this covers normal use). `*` allows any origin (opt-in). A WebSocket request with no `Origin` header (non-browser client) is always allowed. |
 | `AGENTS_OBSERVE_BIND_HOST` | *(set by CLI)* | Internal: the actual listen host the server binds to. The CLI derives it from `AGENTS_OBSERVE_BIND` — `0.0.0.0` inside docker (the host `-p` mapping enforces the boundary), the configured bind host in local/dev. Don't set this manually. |
 | `AGENTS_OBSERVE_DB_PATH` | derived | Absolute path to the SQLite DB file. In Docker: `/data/observe.db`. Locally: computed as `<AGENTS_OBSERVE_LOCAL_DATA_ROOT>/data/observe.db`. |
 | `AGENTS_OBSERVE_STORAGE_ADAPTER` | `sqlite` | Storage backend. Only `sqlite` is supported today. |

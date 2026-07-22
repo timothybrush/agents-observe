@@ -27,6 +27,34 @@ export function isLoopbackOrigin(origin: string): boolean {
   }
 }
 
+/**
+ * Core origin policy, shared by the HTTP CORS layer and the WebSocket
+ * handshake so both enforce the same rule:
+ *   - allowlist contains `*` → any origin
+ *   - allowlist non-empty    → exact match
+ *   - allowlist empty        → loopback origins only (the secure default)
+ */
+export function isOriginAllowed(origin: string, allowedOrigins: string[]): boolean {
+  if (allowedOrigins.includes('*')) return true
+  if (allowedOrigins.length > 0) return allowedOrigins.includes(origin)
+  return isLoopbackOrigin(origin)
+}
+
+/**
+ * WebSocket handshake variant. A missing Origin header means a non-browser
+ * client (CLI, server-to-server) — allowed, since it can already reach the
+ * loopback-bound server directly and isn't subject to cross-site hijacking.
+ * Browsers always send Origin, so the drive-by vector (a malicious page
+ * opening ws://localhost) is still blocked.
+ */
+export function isWsOriginAllowed(
+  origin: string | undefined,
+  allowedOrigins: string[],
+): boolean {
+  if (!origin) return true
+  return isOriginAllowed(origin, allowedOrigins)
+}
+
 type CorsOrigin = string | string[] | ((origin: string, c: Context) => string | null)
 
 /**
