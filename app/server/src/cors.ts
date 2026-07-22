@@ -47,10 +47,7 @@ export function isOriginAllowed(origin: string, allowedOrigins: string[]): boole
  * Browsers always send Origin, so the drive-by vector (a malicious page
  * opening ws://localhost) is still blocked.
  */
-export function isWsOriginAllowed(
-  origin: string | undefined,
-  allowedOrigins: string[],
-): boolean {
+export function isWsOriginAllowed(origin: string | undefined, allowedOrigins: string[]): boolean {
   if (!origin) return true
   return isOriginAllowed(origin, allowedOrigins)
 }

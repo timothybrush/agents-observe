@@ -617,8 +617,7 @@ function ToolDetail({
                 const statusTo = statusChange?.to || ti.status
                 const activeForm = ti.activeForm as string | undefined
                 const desc = (ti.description || ti.subject || ep.task_description) as
-                  | string
-                  | undefined
+                  string | undefined
                 const label =
                   e.hookName === 'TaskCreated'
                     ? 'Created'
@@ -886,8 +885,7 @@ function ToolDetail({
       const postPayload = pairedEvent?.payload as Record<string, any> | undefined
       const toolResponse = postPayload?.tool_response || payload.tool_response
       const spawnedAgentId = (toolResponse?.agentId || postPayload?.tool_response?.agentId) as
-        | string
-        | undefined
+        string | undefined
       const spawnedAgent = spawnedAgentId ? getAgent(spawnedAgentId) : undefined
       const agentAssignedName = spawnedAgent ? getAgentDisplayName(spawnedAgent) : null
       const agentRawName = ti.name as string | undefined

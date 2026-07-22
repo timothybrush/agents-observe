@@ -90,8 +90,7 @@ const LABELS: Record<string, string> = {
  */
 function diffAgentPatch(
   current:
-    | { name?: string | null; description?: string | null; agentType?: string | null }
-    | undefined,
+    { name?: string | null; description?: string | null; agentType?: string | null } | undefined,
   proposed: { name?: string | null; description?: string | null; agent_type?: string | null },
 ): { name?: string | null; description?: string | null; agent_type?: string | null } | null {
   const patch: { name?: string | null; description?: string | null; agent_type?: string | null } =
@@ -250,8 +249,7 @@ export function processEvent(
     const isTaskTool = toolName === 'TaskCreate' || toolName === 'TaskUpdate'
     const taskId = (p.task_id ??
       (isTaskTool ? (p.tool_input?.taskId ?? p.tool_response?.taskId) : undefined)) as
-      | string
-      | undefined
+      string | undefined
     if (taskId) {
       groupId = `task-${taskId}`
     }

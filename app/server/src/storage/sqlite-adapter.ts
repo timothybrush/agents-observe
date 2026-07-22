@@ -471,8 +471,7 @@ export class SqliteAdapter implements EventStore {
 
   async isSlugAvailable(slug: string): Promise<boolean> {
     const row = this.db.prepare(`SELECT id FROM projects WHERE slug = ?`).get(slug) as
-      | { id: number }
-      | undefined
+      { id: number } | undefined
     return row === undefined
   }
 
@@ -490,14 +489,12 @@ export class SqliteAdapter implements EventStore {
       .run(slug, name ?? slug, now, now)
     const created = insertResult.changes === 1
     let row = this.db.prepare('SELECT id, slug FROM projects WHERE slug = ?').get(slug) as
-      | { id: number; slug: string }
-      | undefined
+      { id: number; slug: string } | undefined
     if (!row) {
       // Defensive retry — SQLite serializes writes so this is unreachable
       // in practice. Retry once before giving up.
       row = this.db.prepare('SELECT id, slug FROM projects WHERE slug = ?').get(slug) as
-        | { id: number; slug: string }
-        | undefined
+        { id: number; slug: string } | undefined
       if (!row) throw new Error(`findOrCreateProjectBySlug: slug ${slug} disappeared`)
     }
     return { id: row.id, slug: row.slug, created }
@@ -534,8 +531,7 @@ export class SqliteAdapter implements EventStore {
          LIMIT 1`,
       )
       .get(excludeSessionId, startCwd, startCwd, basedirPrefix, basedirPrefix) as
-      | { project_id: number }
-      | undefined
+      { project_id: number } | undefined
     return row ? { projectId: row.project_id } : null
   }
 
@@ -897,8 +893,7 @@ export class SqliteAdapter implements EventStore {
 
   async getFilterById(id: string): Promise<Filter | null> {
     const row = this.db.prepare('SELECT * FROM filters WHERE id = ?').get(id) as
-      | FilterRow
-      | undefined
+      FilterRow | undefined
     return row ? this.rowToFilter(row) : null
   }
 
