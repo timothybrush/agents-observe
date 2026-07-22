@@ -1,5 +1,30 @@
 # Changelog
 
+## v0.9.12 — Security hardening and cross-platform fixes
+
+This release tightens default security by binding the server to loopback, restricting CORS, and rejecting cross-origin WebSocket connections. It also fixes running the dashboard on Windows and SELinux hosts, and improves structured output summaries.
+
+### Breaking Changes
+
+The server now binds to loopback (localhost) and restricts CORS by default, so the dashboard is no longer reachable from other machines or cross-origin pages out of the box. If you access the dashboard remotely or from a different origin, you'll need to explicitly configure the server's host binding and allowed origins to opt back in.
+
+### Features
+
+- Structured output summaries now include the field name for clearer context.
+
+### Fixes
+
+- Bind the server to loopback and restrict CORS by default to prevent unwanted network access.
+- Reject cross-origin WebSocket connections.
+- Correctly mount transcript directories on Windows and fix the health check's database path.
+- Relabel Docker bind mounts on SELinux hosts so containers can access them.
+- Render the agent combobox and session icons on unassigned sessions.
+
+### Other
+
+- Hardened the test suite (hermetic hook-autostart test, localStorage polyfill for jsdom on Node 26).
+- Bumped better-sqlite3 and applied Prettier formatting across the codebase.
+
 ## v0.9.11 — NEW Constellation dashboard, Hermes agent support, and richer conversation threads
 
 This release introduces the fun new Constellation UI home-page view — an activity bubble visualization. It adds first-class support for Hermes agents, including dedicated event rendering, session stats, and model pricing, alongside a redesigned collapsible conversation thread with navigation and stable scrolling.
