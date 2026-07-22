@@ -95,6 +95,29 @@ export function buildPortMapping(bindHost, hostPort, containerPort) {
 }
 
 /**
+ * Build the `-v` args for the read-only transcript bind mounts (one per
+ * agent class). Returns a flat array suitable for `docker run`, e.g.
+ * `['-v', '<host>:/host/.claude/projects:ro', ...]`.
+ *
+ * Filters on the host path directly rather than parsing it back out of the
+ * joined mount string. A Windows host path (`C:\Users\...`) contains the
+ * drive-letter colon, so splitting the mount on `:` mistook the drive letter
+ * for the source and silently dropped both mounts — GitHub issue #21.
+ *
+ * `exists` is injectable so the filter can be unit-tested with Windows-style
+ * paths on a POSIX host.
+ */
+export function buildTranscriptMounts({ claudeHost, codexHost, enabled }, exists = existsSync) {
+  if (!enabled) return []
+  return [
+    { host: claudeHost, container: '/host/.claude/projects' },
+    { host: codexHost, container: '/host/.codex/sessions' },
+  ]
+    .filter(({ host }) => host && exists(host))
+    .flatMap(({ host, container }) => ['-v', `${host}:${container}:ro`])
+}
+
+/**
  * Starts the Docker container. Returns the actual port the server is running on.
  * Handles: version mismatch (restart), port conflict (auto-assign), stale containers.
  *
@@ -193,17 +216,11 @@ export async function startServer(config, log = console) {
     // fixed so the server's resolveTranscriptPath knows where things
     // land. Missing host paths are silently skipped so e.g. a user
     // without codex installed doesn't error out.
-    const transcriptMounts = config.transcriptStatsEnabled
-      ? [
-          ['-v', `${config.transcriptClaudeHost}:/host/.claude/projects:ro`],
-          ['-v', `${config.transcriptCodexHost}:/host/.codex/sessions:ro`],
-        ]
-          .filter(([, mount]) => {
-            const [src] = mount.split(':')
-            return src && existsSync(src)
-          })
-          .flat()
-      : []
+    const transcriptMounts = buildTranscriptMounts({
+      claudeHost: config.transcriptClaudeHost,
+      codexHost: config.transcriptCodexHost,
+      enabled: config.transcriptStatsEnabled,
+    })
     return [
       'run',
       '-d',

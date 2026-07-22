@@ -7,6 +7,22 @@ import { fileURLToPath } from 'url'
 
 const logLevel = (process.env.AGENTS_OBSERVE_LOG_LEVEL || 'debug').toLowerCase()
 
+/**
+ * Resolve the host-side DB path surfaced on `/api/health`.
+ *
+ * In docker the CLI passes `AGENTS_OBSERVE_HOST_DB_PATH` — an already-absolute
+ * path on the *host*, which may be a Windows path (`C:\Users\...`). Running
+ * `resolve()` on it inside the Linux container mangles it, because POSIX
+ * `resolve` treats `C:\...` as relative and prefixes the container cwd
+ * (`/app/server/C:\Users\...`) — GitHub issue #21. So pass it through
+ * verbatim; only the local-mode fallback (a real path on this OS) needs
+ * `resolve()`.
+ */
+export function resolveHostDbPath(hostDbPath?: string, dbPath?: string): string {
+  if (hostDbPath) return hostDbPath
+  return resolve(dbPath || '../../data/observe.db')
+}
+
 function detectRuntime(): 'docker' | 'local' {
   const explicit = process.env.AGENTS_OBSERVE_RUNTIME
   if (explicit === 'docker' || explicit === 'local') return explicit
@@ -58,10 +74,9 @@ export const config = {
   // the docker container so the dashboard can show the user where the DB
   // lives on their machine rather than the in-container `/data/observe.db`.
   // Falls back to `dbPath` in local mode (where they're already the same).
-  hostDbPath: resolve(
-    process.env.AGENTS_OBSERVE_HOST_DB_PATH ||
-      process.env.AGENTS_OBSERVE_DB_PATH ||
-      '../../data/observe.db',
+  hostDbPath: resolveHostDbPath(
+    process.env.AGENTS_OBSERVE_HOST_DB_PATH,
+    process.env.AGENTS_OBSERVE_DB_PATH,
   ),
   // Directory for persistent server state outside the SQLite DB —
   // currently just the models.dev pricing cache. Derived from dbPath so
