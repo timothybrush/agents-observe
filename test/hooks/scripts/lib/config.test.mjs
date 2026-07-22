@@ -26,6 +26,7 @@ const envKeys = [
   'AGENTS_OBSERVE_NOTIFICATION_ON_EVENTS',
   'AGENTS_OBSERVE_BIND',
   'AGENTS_OBSERVE_CORS_ORIGINS',
+  'AGENTS_OBSERVE_SELINUX_RELABEL',
 ]
 
 let savedEnv
@@ -159,6 +160,34 @@ describe('config', () => {
     process.env.AGENTS_OBSERVE_CORS_ORIGINS = 'https://a.example,https://b.example'
     const cfg = await loadConfig()
     expect(cfg.corsOrigins).toBe('https://a.example,https://b.example')
+  })
+
+  // --- SELinux relabel (issue #20) ---
+
+  it('resolves selinuxRelabel to a boolean by default (auto-detect)', async () => {
+    const cfg = await loadConfig()
+    expect(typeof cfg.selinuxRelabel).toBe('boolean')
+  })
+
+  it('forces selinuxRelabel on via AGENTS_OBSERVE_SELINUX_RELABEL', async () => {
+    for (const v of ['1', 'true', 'on', 'yes']) {
+      process.env.AGENTS_OBSERVE_SELINUX_RELABEL = v
+      const cfg = await loadConfig()
+      expect(cfg.selinuxRelabel).toBe(true)
+    }
+  })
+
+  it('forces selinuxRelabel off via AGENTS_OBSERVE_SELINUX_RELABEL (overrides detection)', async () => {
+    for (const v of ['0', 'false', 'off']) {
+      process.env.AGENTS_OBSERVE_SELINUX_RELABEL = v
+      const cfg = await loadConfig()
+      expect(cfg.selinuxRelabel).toBe(false)
+    }
+  })
+
+  it('accepts selinuxRelabel via overrides', async () => {
+    expect((await loadConfig({ selinuxRelabel: 'on' })).selinuxRelabel).toBe(true)
+    expect((await loadConfig({ selinuxRelabel: 'off' })).selinuxRelabel).toBe(false)
   })
 
   // --- isPlugin ---

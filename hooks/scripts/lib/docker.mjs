@@ -95,6 +95,18 @@ export function buildPortMapping(bindHost, hostPort, containerPort) {
 }
 
 /**
+ * Build the `-v` value for the writable data mount. On SELinux hosts the
+ * bind-mounted dir keeps its host label and the confined container can't write
+ * to it, so the sqlite DB fails to open (SQLITE_CANTOPEN — GitHub issue #20).
+ * Appending `z` relabels the dir to the shared container-accessible type. This
+ * dir is ours (`<data root>/data`, only the DB + logs), so relabeling it
+ * recursively is safe.
+ */
+export function buildDataMount(dataDir, relabel = false) {
+  return `${dataDir}:/data${relabel ? ':z' : ''}`
+}
+
+/**
  * Build the `-v` args for the read-only transcript bind mounts (one per
  * agent class). Returns a flat array suitable for `docker run`, e.g.
  * `['-v', '<host>:/host/.claude/projects:ro', ...]`.
@@ -104,17 +116,26 @@ export function buildPortMapping(bindHost, hostPort, containerPort) {
  * drive-letter colon, so splitting the mount on `:` mistook the drive letter
  * for the source and silently dropped both mounts — GitHub issue #21.
  *
+ * When `relabel` is set, appends the shared SELinux relabel option (`,z`) so
+ * the container can read these dirs on SELinux hosts (issue #20). These are
+ * the user's ~/.claude and ~/.codex dirs, so `z` (shared) is used — never `Z`
+ * (private) — and it can be disabled via AGENTS_OBSERVE_SELINUX_RELABEL.
+ *
  * `exists` is injectable so the filter can be unit-tested with Windows-style
  * paths on a POSIX host.
  */
-export function buildTranscriptMounts({ claudeHost, codexHost, enabled }, exists = existsSync) {
+export function buildTranscriptMounts(
+  { claudeHost, codexHost, enabled, relabel = false },
+  exists = existsSync,
+) {
   if (!enabled) return []
+  const opts = relabel ? 'ro,z' : 'ro'
   return [
     { host: claudeHost, container: '/host/.claude/projects' },
     { host: codexHost, container: '/host/.codex/sessions' },
   ]
     .filter(({ host }) => host && exists(host))
-    .flatMap(({ host, container }) => ['-v', `${host}:${container}:ro`])
+    .flatMap(({ host, container }) => ['-v', `${host}:${container}:${opts}`])
 }
 
 /**
@@ -220,6 +241,7 @@ export async function startServer(config, log = console) {
       claudeHost: config.transcriptClaudeHost,
       codexHost: config.transcriptCodexHost,
       enabled: config.transcriptStatsEnabled,
+      relabel: config.selinuxRelabel,
     })
     return [
       'run',
@@ -232,7 +254,7 @@ export async function startServer(config, log = console) {
       portMapping,
       ...envArgs,
       '-v',
-      `${config.dataDir}:/data`,
+      buildDataMount(config.dataDir, config.selinuxRelabel),
       ...transcriptMounts,
       config.dockerImage,
     ]

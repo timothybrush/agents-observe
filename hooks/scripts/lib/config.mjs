@@ -4,6 +4,7 @@
 
 import { resolve, dirname } from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { existsSync } from 'node:fs'
 import { ALL_CALLBACK_HANDLERS } from './callbacks.mjs'
 import {
   resolvePluginDataDir,
@@ -125,6 +126,30 @@ export function getConfig(overrides = {}) {
           .filter((s) => ALL_CALLBACK_HANDLERS.includes(s)),
   )
 
+  // SELinux volume relabeling for docker bind mounts. On SELinux hosts the
+  // bind-mounted data dir keeps its host label (user_home_t), which the
+  // confined container can't write to, so the sqlite DB open fails with
+  // SQLITE_CANTOPEN and the server never starts (GitHub issue #20). The `z`
+  // mount option relabels the dir to the shared container-accessible type.
+  //
+  // Default 'auto': detect via selinuxfs (present on enforcing AND permissive
+  // hosts; absent on non-SELinux systems and Docker Desktop / Mac / Windows /
+  // WSL, so the option is never emitted there). AGENTS_OBSERVE_SELINUX_RELABEL
+  // forces it on/off — e.g. off for users who don't want their ~/.claude and
+  // ~/.codex transcript dirs relabeled.
+  const selinuxRelabelSetting = (
+    overrides.selinuxRelabel ??
+    process.env.AGENTS_OBSERVE_SELINUX_RELABEL ??
+    'auto'
+  )
+    .toString()
+    .trim()
+    .toLowerCase()
+  const selinuxRelabel =
+    selinuxRelabelSetting === '' || selinuxRelabelSetting === 'auto'
+      ? existsSync('/sys/fs/selinux')
+      : ['1', 'true', 'on', 'yes'].includes(selinuxRelabelSetting)
+
   return {
     pluginName,
     isPlugin,
@@ -197,6 +222,8 @@ export function getConfig(overrides = {}) {
 
     API_ID: 'agents-observe',
     dockerLabel: 'simple10-agents-observe.managed',
+    /** True when docker bind mounts should carry the SELinux `z` relabel option (issue #20). */
+    selinuxRelabel,
     expectedVersion: version,
 
     /** Max ms to wait for server startup in hook-autostart before returning a timeout message */

@@ -1,6 +1,10 @@
 // test/hooks/scripts/lib/docker.test.mjs
 import { describe, it, expect } from 'vitest'
-import { buildPortMapping, buildTranscriptMounts } from '../../../../hooks/scripts/lib/docker.mjs'
+import {
+  buildPortMapping,
+  buildTranscriptMounts,
+  buildDataMount,
+} from '../../../../hooks/scripts/lib/docker.mjs'
 
 describe('buildPortMapping (issue #22)', () => {
   it('prefixes the loopback bind host by default', () => {
@@ -87,5 +91,43 @@ describe('buildTranscriptMounts (issue #21)', () => {
         neverExists,
       ),
     ).toEqual([])
+  })
+
+  it('appends the shared SELinux relabel option (,z) when relabel is set (issue #20)', () => {
+    const mounts = buildTranscriptMounts(
+      {
+        claudeHost: '/home/me/.claude/projects',
+        codexHost: '/home/me/.codex/sessions',
+        enabled: true,
+        relabel: true,
+      },
+      alwaysExists,
+    )
+    expect(mounts).toEqual([
+      '-v',
+      '/home/me/.claude/projects:/host/.claude/projects:ro,z',
+      '-v',
+      '/home/me/.codex/sessions:/host/.codex/sessions:ro,z',
+    ])
+  })
+})
+
+describe('buildDataMount (issue #20)', () => {
+  it('mounts the data dir at /data without a relabel option by default', () => {
+    expect(buildDataMount('/home/me/.agents-observe/data')).toBe(
+      '/home/me/.agents-observe/data:/data',
+    )
+  })
+
+  it('appends the SELinux relabel option (:z) when relabel is set', () => {
+    expect(buildDataMount('/home/me/.agents-observe/data', true)).toBe(
+      '/home/me/.agents-observe/data:/data:z',
+    )
+  })
+
+  it('does not relabel when relabel is false', () => {
+    expect(buildDataMount('/home/me/.agents-observe/data', false)).toBe(
+      '/home/me/.agents-observe/data:/data',
+    )
   })
 })
