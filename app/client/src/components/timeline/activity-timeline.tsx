@@ -135,7 +135,8 @@ export function ActivityTimeline() {
       const onMouseMove = (e: MouseEvent) => {
         if (!resizing.current) return
         const delta = e.clientY - startY.current
-        const newHeight = Math.max(60, Math.min(400, startHeight.current + delta))
+        const maxHeight = window.innerHeight * 0.8
+        const newHeight = Math.max(60, Math.min(maxHeight, startHeight.current + delta))
         // Update DOM directly during drag to avoid React re-renders
         if (containerRef.current) {
           containerRef.current.style.height = `${newHeight}px`
@@ -147,7 +148,8 @@ export function ActivityTimeline() {
       const onMouseUp = (e: MouseEvent) => {
         resizing.current = false
         const delta = e.clientY - startY.current
-        const finalHeight = Math.max(60, Math.min(400, startHeight.current + delta))
+        const maxHeight = window.innerHeight * 0.8
+        const finalHeight = Math.max(60, Math.min(maxHeight, startHeight.current + delta))
         // Commit final height to React state
         setTimelineHeight(finalHeight)
         document.removeEventListener('mousemove', onMouseMove)
